@@ -136,6 +136,9 @@ jobs:
         # run the CLI to enable Bitrise build cache for Gradle
         /tmp/bin/bitrise-build-cache activate gradle --cache --cache-push -d
     
+    - name: "[dry-run] test"
+      run: ./gradlew testFdroidDebug --info --dry-run
+
     - name: test
       run: ./gradlew testFdroidDebug --info
 
