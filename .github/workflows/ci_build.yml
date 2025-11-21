@@ -134,10 +134,10 @@ jobs:
         curl --retry 5 -sSfL 'https://raw.githubusercontent.com/bitrise-io/bitrise-build-cache-cli/main/install/installer.sh' | sh -s -- -b /tmp/bin -d
         
         # run the CLI to enable Bitrise build cache for Gradle
-        /tmp/bin/bitrise-build-cache activate gradle --cache --cache-push
+        /tmp/bin/bitrise-build-cache activate gradle --cache --cache-push -d
     
     - name: test
-      run: ./gradlew testFdroidDebug
+      run: ./gradlew testFdroidDebug --info
 
   fdroid-apk:
     runs-on: ubuntu-latest
