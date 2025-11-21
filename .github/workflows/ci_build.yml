@@ -122,6 +122,9 @@ jobs:
       with:
         cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
 
+    - name: "[dry-run] test"
+      run: ./gradlew testFdroidDebug --dry-run
+    
     - name: test
       run: ./gradlew testFdroidDebug
 
