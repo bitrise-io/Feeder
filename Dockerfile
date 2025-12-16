@@ -1,4 +1,4 @@
-# Use Ubuntu as base - force linux/amd64 platform for Android build tools compatibility
+# Use Ubuntu as base - force amd64 for Android build tools compatibility and best performance via Rosetta 2
 FROM --platform=linux/amd64 ubuntu:22.04
 
 # Set environment variables early
@@ -45,4 +45,4 @@ COPY . .
 RUN chmod +x ./gradlew
 
 # Run the test command
-CMD ["./gradlew", "testFdroidDebug"]
+# CMD ["./gradlew", "testFdroidDebug"]
