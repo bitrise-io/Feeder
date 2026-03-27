@@ -11,6 +11,7 @@ Feeder
 <img src="https://hosted.weblate.org/widgets/feeder/-/android-strings/svg-badge.svg" alt="Translation status" />
 </a>
 
+
 ### Description
 
 Feeder is an open source feed reader (RSS/Atom/JSONFeed) for Android created in 2014.
