@@ -1,0 +1,38 @@
+# Git - keep .git directory as build.gradle.kts needs it for version code
+.github
+.gitignore
+.gitmodules
+
+# Gradle
+.gradle
+build/
+*/build/
+gradle-app.setting
+!gradle-wrapper.jar
+.gradletasknamecache
+
+# IDE
+.idea/
+*.iml
+.project
+.classpath
+.settings/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# CI/CD
+.circleci
+.gitlab-ci.bak
+.build.yml
+
+# Documentation
+*.md
+!README.md
+graphics/
+
+# Other
+local.properties

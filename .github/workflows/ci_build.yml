@@ -125,6 +125,23 @@ jobs:
     - name: test
       run: ./gradlew testFdroidDebug
 
+  docker-test:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+    - name: checkout
+      uses: actions/checkout@v5
+      with:
+        submodules: 'recursive'
+        fetch-depth: 0
+        fetch-tags: true
+
+    - name: run tests via docker
+      run: ./docker-test.sh
+
   fdroid-apk:
     runs-on: ubuntu-latest
     timeout-minutes: 30
