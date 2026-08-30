@@ -1,6 +1,9 @@
 package com.nononsenseapps.feeder.ui.compose.feedarticle
 
+import android.content.Context
 import android.content.Intent
+import android.provider.Settings
+import android.text.format.DateFormat
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.foundation.ScrollState
@@ -30,7 +33,10 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.OpenInBrowser
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -41,12 +47,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
@@ -63,9 +71,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nononsenseapps.feeder.R
 import com.nononsenseapps.feeder.archmodel.TextToDisplay
 import com.nononsenseapps.feeder.db.room.ID_UNSET
+import com.nononsenseapps.feeder.localtranslation.BergamotModelDownloadProgress
 import com.nononsenseapps.feeder.model.LocaleOverride
 import com.nononsenseapps.feeder.ui.MainActivityViewModel
 import com.nononsenseapps.feeder.ui.ScrollDirection
+import com.nononsenseapps.feeder.ui.compose.components.TranslationProgressContent
 import com.nononsenseapps.feeder.ui.compose.components.safeSemantics
 import com.nononsenseapps.feeder.ui.compose.feed.PlainTooltipBox
 import com.nononsenseapps.feeder.ui.compose.html.ColumnArticleContent
@@ -77,12 +87,17 @@ import com.nononsenseapps.feeder.ui.compose.utils.ImmutableHolder
 import com.nononsenseapps.feeder.ui.compose.utils.ScreenType
 import com.nononsenseapps.feeder.ui.compose.utils.onKeyEventLikeEscape
 import com.nononsenseapps.feeder.util.ActivityLauncher
+import com.nononsenseapps.feeder.util.stripTrackingParameters
 import com.nononsenseapps.feeder.util.unicodeWrap
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 import org.kodein.di.compose.LocalDI
 import org.kodein.di.instance
+import java.text.SimpleDateFormat
 import java.time.ZoneId
 import java.time.ZonedDateTime
+import java.util.Date
+import java.util.TimeZone
 
 @Composable
 fun ArticleScreen(
@@ -101,8 +116,14 @@ fun ArticleScreen(
     val isPagingMode by mavm.isPagingMode.collectAsStateWithLifecycle()
     val isAnimatedPaging by mavm.isAnimatedPaging.collectAsStateWithLifecycle()
 
-    val articleScrollState = rememberScrollState()
+    val articleScrollState = rememberScrollState(initial = viewModel.scrollPosition)
     val coroutineScope = rememberCoroutineScope()
+
+    LaunchedEffect(articleScrollState) {
+        snapshotFlow { articleScrollState.value }
+            .debounce(500)
+            .collect { viewModel.saveScrollPosition(it) }
+    }
 
     LaunchedEffect(Unit) {
         mavm.scrollCommand.collect { direction ->
@@ -140,8 +161,12 @@ fun ArticleScreen(
                 val intent =
                     Intent.createChooser(
                         Intent(Intent.ACTION_SEND).apply {
-                            if (viewState.articleLink != null) {
-                                putExtra(Intent.EXTRA_TEXT, viewState.articleLink)
+                            val articleLink = viewState.articleLink
+                            if (articleLink != null) {
+                                putExtra(
+                                    Intent.EXTRA_TEXT,
+                                    stripTrackingParameters(articleLink),
+                                )
                             }
                             putExtra(Intent.EXTRA_TITLE, viewState.articleTitle)
                             type = "text/plain"
@@ -162,12 +187,19 @@ fun ArticleScreen(
         onFeedTitleClick = {
             onNavigateToFeed(viewState.articleFeedId)
         },
+        onOpenAudioPlayer = viewModel::openPodcastPlayer,
         onShowToolbarMenu = viewModel::setToolbarMenuVisible,
         ttsOnPlay = viewModel::ttsPlay,
         ttsOnPause = viewModel::ttsPause,
         ttsOnStop = viewModel::ttsStop,
         ttsOnSkipNext = viewModel::ttsSkipNext,
         ttsOnSelectLanguage = viewModel::ttsOnSelectLanguage,
+        podcastOnPlay = viewModel::podcastPlay,
+        podcastOnPause = viewModel::podcastPause,
+        podcastOnStop = viewModel::stopPodcastPlayback,
+        podcastOnSeekBack = { viewModel.podcastSeekBy(-10_000) },
+        podcastOnSeekForward = { viewModel.podcastSeekBy(10_000) },
+        podcastOnSeekTo = viewModel::podcastSeekTo,
         onToggleBookmark = {
             viewModel.setBookmarked(!viewState.isBookmarked)
         },
@@ -176,6 +208,17 @@ fun ArticleScreen(
         onSummarize = {
             viewModel.summarize()
         },
+        onTranslate = {
+            viewModel.translate()
+        },
+        onOpenSystemTranslationSettings = {
+            activityLauncher.startActivity(
+                openAdjacentIfSuitable = false,
+                intent = Intent(Settings.ACTION_SETTINGS),
+            )
+            viewModel.dismissSystemTranslationSettingsPrompt()
+        },
+        onDismissSystemTranslationSettings = viewModel::dismissSystemTranslationSettingsPrompt,
         modifier = modifier,
         isPagingMode = isPagingMode,
         isAnimatedPaging = isAnimatedPaging,
@@ -193,16 +236,26 @@ fun ArticleScreen(
     onShare: () -> Unit,
     onOpenInCustomTab: () -> Unit,
     onFeedTitleClick: () -> Unit,
+    onOpenAudioPlayer: (url: String) -> Unit,
     onShowToolbarMenu: (Boolean) -> Unit,
     ttsOnPlay: () -> Unit,
     ttsOnPause: () -> Unit,
     ttsOnStop: () -> Unit,
     ttsOnSkipNext: () -> Unit,
     ttsOnSelectLanguage: (LocaleOverride) -> Unit,
+    podcastOnPlay: () -> Unit,
+    podcastOnPause: () -> Unit,
+    podcastOnStop: () -> Unit,
+    podcastOnSeekBack: () -> Unit,
+    podcastOnSeekForward: () -> Unit,
+    podcastOnSeekTo: (Int) -> Unit,
     onToggleBookmark: () -> Unit,
     articleScrollState: ScrollState,
     onNavigateUp: () -> Unit,
     onSummarize: () -> Unit,
+    onTranslate: () -> Unit,
+    onOpenSystemTranslationSettings: () -> Unit,
+    onDismissSystemTranslationSettings: () -> Unit,
     modifier: Modifier = Modifier,
     isPagingMode: Boolean = false,
     isAnimatedPaging: Boolean = false,
@@ -320,6 +373,35 @@ fun ArticleScreen(
                                     )
                                 }
 
+                                if (viewState.showTranslate) {
+                                    DropdownMenuItem(
+                                        onClick = {
+                                            onShowToolbarMenu(false)
+                                            onTranslate()
+                                        },
+                                        leadingIcon = {
+                                            Icon(
+                                                Icons.Default.Translate,
+                                                contentDescription = null,
+                                            )
+                                        },
+                                        text = {
+                                            Text(
+                                                stringResource(
+                                                    if (viewState.isShowingTranslated) {
+                                                        R.string.show_original_language
+                                                    } else {
+                                                        R.string.translate_article
+                                                    },
+                                                    viewState.translationSourceLanguage.ifBlank {
+                                                        stringResource(R.string.original_article)
+                                                    },
+                                                ),
+                                            )
+                                        },
+                                    )
+                                }
+
                                 DropdownMenuItem(
                                     onClick = {
                                         onShowToolbarMenu(false)
@@ -394,16 +476,29 @@ fun ArticleScreen(
             )
         },
         bottomBar = {
-            HideableTTSPlayer(
-                visibleState = bottomBarVisibleState,
-                currentlyPlaying = viewState.isTTSPlaying,
-                onPlay = ttsOnPlay,
-                onPause = ttsOnPause,
-                onStop = ttsOnStop,
-                onSkipNext = ttsOnSkipNext,
-                languages = ImmutableHolder(viewState.ttsLanguages),
-                onSelectLanguage = ttsOnSelectLanguage,
-            )
+            if (viewState.podcastPlayerState.isVisible) {
+                HideablePodcastPlayer(
+                    visibleState = bottomBarVisibleState,
+                    viewState = viewState.podcastPlayerState,
+                    onPlay = podcastOnPlay,
+                    onPause = podcastOnPause,
+                    onStop = podcastOnStop,
+                    onSeekBack = podcastOnSeekBack,
+                    onSeekForward = podcastOnSeekForward,
+                    onSeekTo = podcastOnSeekTo,
+                )
+            } else {
+                HideableTTSPlayer(
+                    visibleState = bottomBarVisibleState,
+                    currentlyPlaying = viewState.isTTSPlaying,
+                    onPlay = ttsOnPlay,
+                    onPause = ttsOnPause,
+                    onStop = ttsOnStop,
+                    onSkipNext = ttsOnSkipNext,
+                    languages = ImmutableHolder(viewState.ttsLanguages),
+                    onSelectLanguage = ttsOnSelectLanguage,
+                )
+            }
         },
     ) { padding ->
         // Box handles the dynamic padding so ArticleContent don't have to recompose on scroll
@@ -418,6 +513,8 @@ fun ArticleScreen(
                 screenType = ScreenType.SINGLE,
                 articleScrollState = articleScrollState,
                 onFeedTitleClick = onFeedTitleClick,
+                onOpenAudioPlayer = onOpenAudioPlayer,
+                onOpenInCustomTab = onOpenInCustomTab,
                 modifier =
                     Modifier
                         .focusGroup()
@@ -474,6 +571,38 @@ fun ArticleScreen(
             }
         }
     }
+
+    if (viewState.systemTranslationSettingsMessage.isNotBlank()) {
+        SystemTranslationSettingsDialog(
+            message = viewState.systemTranslationSettingsMessage,
+            onOpenSettings = onOpenSystemTranslationSettings,
+            onDismiss = onDismissSystemTranslationSettings,
+        )
+    }
+}
+
+@Composable
+private fun SystemTranslationSettingsDialog(
+    message: String,
+    onOpenSettings: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        text = {
+            Text(message)
+        },
+        confirmButton = {
+            TextButton(onClick = onOpenSettings) {
+                Text(stringResource(R.string.open_settings))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(android.R.string.cancel))
+            }
+        },
+    )
 }
 
 @Composable
@@ -481,6 +610,8 @@ fun ArticleContent(
     viewState: ArticleScreenViewState,
     screenType: ScreenType,
     onFeedTitleClick: () -> Unit,
+    onOpenAudioPlayer: (url: String) -> Unit,
+    onOpenInCustomTab: () -> Unit,
     articleScrollState: ScrollState,
     modifier: Modifier = Modifier,
 ) {
@@ -492,13 +623,18 @@ fun ArticleContent(
 
     // Track Y positions of article elements by index for anchor link scrolling
     val elementPositions = remember { mutableMapOf<Int, Float>() }
+    val contentImageUrls = remember(viewState.articleContent) { viewState.articleContent.imageUrls }
 
     ReaderView(
         screenType = screenType,
         wordCount = viewState.wordCount,
         onEnclosureClick = {
             if (viewState.enclosure.present) {
-                activityLauncher.openLinkInBrowser(link = viewState.enclosure.link)
+                if (viewState.useInAppAudioPlayer && shouldOpenInPodcastPlayer(viewState.enclosure.link, viewState.enclosure)) {
+                    onOpenAudioPlayer(viewState.enclosure.link)
+                } else {
+                    activityLauncher.openLinkInBrowser(link = viewState.enclosure.link)
+                }
             }
         },
         onFeedTitleClick = onFeedTitleClick,
@@ -510,9 +646,7 @@ fun ArticleContent(
                 viewState.author == null && viewState.pubDate != null ->
                     stringResource(
                         R.string.on_date,
-                        (viewState.pubDate?.withZoneSameInstant(ZoneId.systemDefault()) ?: ZonedDateTime.now()).format(
-                            dateTimeFormat,
-                        ),
+                        formatArticleDate(context, viewState.pubDate),
                     )
 
                 viewState.author != null && viewState.pubDate != null ->
@@ -521,19 +655,27 @@ fun ArticleContent(
                         // Must wrap author in unicode marks to ensure it formats
                         // correctly in RTL
                         context.unicodeWrap(viewState.author ?: ""),
-                        (viewState.pubDate?.withZoneSameInstant(ZoneId.systemDefault()) ?: ZonedDateTime.now()).format(
-                            dateTimeFormat,
-                        ),
+                        formatArticleDate(context, viewState.pubDate),
                     )
 
                 else -> null
             },
         image = viewState.image,
-        isFeedText = viewState.textToDisplay == TextToDisplay.CONTENT,
+        showHeaderImage = viewState.textToDisplay == TextToDisplay.CONTENT,
+        contentImageUrls = contentImageUrls,
         modifier = modifier,
         articleScrollState = articleScrollState,
     ) { indexOffset ->
         var offsetCounter = indexOffset
+
+        if (viewState.isTranslationLoading) {
+            offsetCounter++
+            viewState.translationModelDownloadProgress?.let { progress ->
+                TranslationModelDownloadProgress(progress)
+            } ?: LinearProgressIndicator(
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
 
         if (viewState.openAiSummary !is OpenAISummaryState.Empty) {
             offsetCounter++
@@ -555,11 +697,15 @@ fun ArticleContent(
                                     }
                                 }
                             } else {
-                                // External link - open in browser/custom tab
-                                activityLauncher.openLink(
-                                    link = link,
-                                    toolbarColor = toolbarColor,
-                                )
+                                if (viewState.useInAppAudioPlayer && shouldOpenInPodcastPlayer(link, viewState.enclosure)) {
+                                    onOpenAudioPlayer(link)
+                                } else {
+                                    // External link - open in browser/custom tab
+                                    activityLauncher.openLink(
+                                        link = link,
+                                        toolbarColor = toolbarColor,
+                                    )
+                                }
                             }
                         },
                         onElementPosition = { index, yPosition ->
@@ -587,8 +733,41 @@ fun ArticleContent(
                 TextToDisplay.FAILED_NOT_HTML -> {
                     Text(text = stringResource(id = R.string.failed_to_fetch_full_article_not_html))
                 }
+
+                TextToDisplay.FAILED_FULLTEXT_TOO_LARGE -> {
+                    Text(text = stringResource(id = R.string.failed_to_fetch_full_article_too_large))
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(onClick = onOpenInCustomTab) {
+                        Text(text = stringResource(id = R.string.open_in_web_view))
+                    }
+                }
             }
         }
+    }
+}
+
+internal fun formatArticleDate(
+    context: Context,
+    publicationDate: ZonedDateTime?,
+    zoneId: ZoneId = ZoneId.systemDefault(),
+): String =
+    publicationDate?.let {
+        val skeleton = if (DateFormat.is24HourFormat(context)) "yMMMMEEEEdHm" else "yMMMMEEEEdhm"
+        val locale = context.resources.configuration.locales[0]
+        SimpleDateFormat(DateFormat.getBestDateTimePattern(locale, skeleton), locale)
+            .apply { timeZone = TimeZone.getTimeZone(zoneId) }
+            .format(Date.from(it.toInstant()))
+    } ?: ""
+
+@Composable
+private fun TranslationModelDownloadProgress(progress: BergamotModelDownloadProgress) {
+    OutlinedCard(
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        TranslationProgressContent(
+            progress = progress,
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }
 

@@ -17,8 +17,10 @@ import com.nononsenseapps.feeder.archmodel.SwipeAsRead
 import com.nononsenseapps.feeder.archmodel.SyncFrequency
 import com.nononsenseapps.feeder.archmodel.ThemeOptions
 import com.nononsenseapps.feeder.base.DIAwareViewModel
+import com.nononsenseapps.feeder.localtranslation.BergamotModelManager
+import com.nononsenseapps.feeder.localtranslation.LanguagePairInfo
 import com.nononsenseapps.feeder.openai.OpenAIApi
-import com.nononsenseapps.feeder.ui.compose.settings.FontSelection
+import com.nononsenseapps.feeder.openai.canUseAsTranslationApi
 import com.nononsenseapps.feeder.ui.compose.settings.FontSelection.SystemDefault
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -41,6 +43,7 @@ class SettingsViewModel(
     private val context: Application by instance()
     private val applicationCoroutineScope: ApplicationCoroutineScope by instance()
     private val openAIApi: OpenAIApi by instance()
+    private val bergamotModelManager: BergamotModelManager by instance()
 
     fun setCurrentTheme(value: ThemeOptions) {
         repository.setCurrentTheme(value)
@@ -100,6 +103,10 @@ class SettingsViewModel(
         repository.setLinkOpener(value)
     }
 
+    fun setUseInAppAudioPlayer(value: Boolean) {
+        repository.setUseInAppAudioPlayer(value)
+    }
+
     fun setSyncFrequency(value: SyncFrequency) =
         applicationCoroutineScope.launch {
             repository.setSyncFrequency(value)
@@ -122,6 +129,11 @@ class SettingsViewModel(
     fun setApplyBlocklistToSummaries(value: Boolean) =
         applicationCoroutineScope.launch {
             repository.setApplyBlocklistToSummaries(value)
+        }
+
+    fun setApplyBlocklistToLinks(value: Boolean) =
+        applicationCoroutineScope.launch {
+            repository.setApplyBlocklistToLinks(value)
         }
 
     fun toggleNotifications(
@@ -163,30 +175,79 @@ class SettingsViewModel(
         repository.setOpenDrawerOnFab(value)
     }
 
+    fun setTranslateArticlePreviewsByDefault(value: Boolean) {
+        repository.setTranslateArticlePreviewsByDefault(value)
+    }
+
+    fun setTranslateArticlesByDefault(value: Boolean) {
+        repository.setTranslateArticlesByDefault(value)
+    }
+
     fun setIsPagingMode(value: Boolean) {
         repository.setIsPagingMode(value)
+    }
+
+    fun setForceSingleColumn(value: Boolean) {
+        repository.setForceSingleColumn(value)
     }
 
     fun setIsAnimatedPaging(value: Boolean) {
         repository.setIsAnimatedPaging(value)
     }
 
-    fun onOpenAISettingsEvent(event: OpenAISettingsEvent) {
-        when (event) {
-            is OpenAISettingsEvent.LoadModels -> loadOpenAIModels(event.settings)
-            is OpenAISettingsEvent.UpdateSettings -> repository.setOpenAiSettings(event.settings)
-            is OpenAISettingsEvent.SwitchEditMode -> {
-                val current = _viewState.value.openAIState
-                _viewState.value = _viewState.value.copy(openAIState = current.copy(isEditMode = event.enabled))
-            }
-            is OpenAISettingsEvent.ShowModelsError -> {
-                val current = _viewState.value.openAIState
-                _viewState.value = _viewState.value.copy(openAIState = current.copy(showModelsError = event.show))
-            }
+    fun onSummaryOpenAISettingsEvent(event: OpenAISettingsEvent) {
+        handleOpenAISettingsEvent(
+            event = event,
+            modelsState = summaryOpenAIModelsState,
+            currentState = { _viewState.value.summaryAIState },
+            updateState = { updatedState -> _viewState.value = _viewState.value.copy(summaryAIState = updatedState) },
+            saveSettings = repository::setOpenAiSettings,
+        )
+    }
+
+    fun onTranslationApiSettingsEvent(event: TranslationApiSettingsEvent) {
+        handleOpenAISettingsEvent(
+            event = event,
+            modelsState = translationApiModelsState,
+            currentState = { _viewState.value.translationApiState },
+            updateState = { updatedState -> _viewState.value = _viewState.value.copy(translationApiState = updatedState) },
+            saveSettings = repository::setTranslationApiSettings,
+        )
+    }
+
+    fun setPreferredTranslationLanguage(value: String) {
+        repository.setPreferredTranslationLanguage(value)
+    }
+
+    fun loadDownloadedLanguagePairs() {
+        viewModelScope.launch {
+            _downloadedLanguagePairs.value = bergamotModelManager.getDownloadedLanguagePairs()
         }
     }
 
-    private val openAIModelsState = MutableStateFlow<OpenAIModelsState>(OpenAIModelsState.None)
+    fun deleteLanguagePair(
+        sourceLanguage: String,
+        targetLanguage: String,
+    ) {
+        viewModelScope.launch {
+            bergamotModelManager.deleteLanguagePair(sourceLanguage, targetLanguage)
+            _downloadedLanguagePairs.value = bergamotModelManager.getDownloadedLanguagePairs()
+        }
+    }
+
+    fun deleteAllLanguagePairs() {
+        viewModelScope.launch {
+            _downloadedLanguagePairs.value.forEach { pair ->
+                bergamotModelManager.deleteLanguagePair(pair.sourceLanguage, pair.targetLanguage)
+            }
+            _downloadedLanguagePairs.value = emptyList()
+        }
+    }
+
+    private val summaryOpenAIModelsState = MutableStateFlow<OpenAIModelsState>(OpenAIModelsState.None)
+    private val translationApiModelsState = MutableStateFlow<TranslationApiModelsState>(OpenAIModelsState.None)
+    private val _downloadedLanguagePairs = MutableStateFlow<List<LanguagePairInfo>>(emptyList())
+    val downloadedLanguagePairs: StateFlow<List<LanguagePairInfo>> = _downloadedLanguagePairs.asStateFlow()
 
     @OptIn(ExperimentalCoroutinesApi::class)
     private val immutableFeedsSettings =
@@ -213,6 +274,7 @@ class SettingsViewModel(
         get() = _viewState.asStateFlow()
 
     init {
+        loadDownloadedLanguagePairs()
         viewModelScope.launch {
             combine(
                 repository.currentTheme,
@@ -243,11 +305,20 @@ class SettingsViewModel(
                 repository.showReadingTime,
                 repository.showTitleUnreadCount,
                 repository.openAISettings,
-                openAIModelsState,
+                summaryOpenAIModelsState,
+                repository.translationApiSettings,
+                repository.preferredTranslationLanguage,
+                translationApiModelsState,
                 repository.isOpenDrawerOnFab,
+                repository.translateArticlePreviewsByDefault,
+                repository.translateArticlesByDefault,
                 repository.font,
                 repository.isPagingMode,
                 repository.isAnimatedPaging,
+                downloadedLanguagePairs,
+                repository.useInAppAudioPlayer,
+                repository.forceSingleColumn,
+                repository.applyBlocklistToLinks,
             ) { params: Array<Any> ->
                 @Suppress("UNCHECKED_CAST")
                 SettingsViewState(
@@ -278,15 +349,28 @@ class SettingsViewModel(
                     isOpenAdjacent = params[24] as Boolean,
                     showReadingTime = params[25] as Boolean,
                     showTitleUnreadCount = params[26] as Boolean,
-                    openAIState =
-                        _viewState.value.openAIState.copy(
+                    summaryAIState =
+                        _viewState.value.summaryAIState.copy(
                             settings = params[27] as OpenAISettings,
                             modelsResult = params[28] as OpenAIModelsState,
                         ),
-                    isOpenDrawerOnFab = params[29] as Boolean,
-                    font = params[30] as FontSelection,
-                    isPagingMode = params[31] as Boolean,
-                    isAnimatedPaging = params[32] as Boolean,
+                    translationApiState =
+                        _viewState.value.translationApiState.copy(
+                            settings = params[29] as OpenAISettings,
+                            modelsResult = params[31] as OpenAIModelsState,
+                        ),
+                    preferredTranslationLanguage = params[30] as String,
+                    canTranslate = (params[29] as OpenAISettings).canUseAsTranslationApi && (params[30] as String).trim().isNotBlank(),
+                    isOpenDrawerOnFab = params[32] as Boolean,
+                    translateArticlePreviewsByDefault = params[33] as Boolean,
+                    translateArticlesByDefault = params[34] as Boolean,
+                    font = params[35] as FontSelection,
+                    isPagingMode = params[36] as Boolean,
+                    isAnimatedPaging = params[37] as Boolean,
+                    translationModelPairs = params[38] as List<LanguagePairInfo>,
+                    useInAppAudioPlayer = params[39] as Boolean,
+                    forceSingleColumn = params[40] as Boolean,
+                    applyBlocklistToLinks = params[41] as Boolean,
                 )
             }.collect {
                 _viewState.value = it
@@ -294,19 +378,43 @@ class SettingsViewModel(
         }
     }
 
-    private fun loadOpenAIModels(settings: OpenAISettings) {
+    private fun loadOpenAIModels(
+        stateFlow: MutableStateFlow<OpenAIModelsState>,
+        settings: OpenAISettings,
+    ) {
         viewModelScope.launch(Dispatchers.IO) {
-            openAIModelsState.value = OpenAIModelsState.Loading
-            openAIModelsState.value =
+            stateFlow.value = OpenAIModelsState.Loading(settings)
+            stateFlow.value =
                 openAIApi.listModelIds(settings).let { res ->
                     when (res) {
-                        is OpenAIApi.ModelsResult.Error -> OpenAIModelsState.Error(res.message ?: "")
+                        is OpenAIApi.ModelsResult.Error -> OpenAIModelsState.Error(res.message ?: "", settings)
                         OpenAIApi.ModelsResult.MissingToken -> OpenAIModelsState.None
-                        is OpenAIApi.ModelsResult.Success -> OpenAIModelsState.Success(res.ids)
+                        is OpenAIApi.ModelsResult.Success -> OpenAIModelsState.Success(res.ids, settings)
                         OpenAIApi.ModelsResult.AzureApiVersionRequired -> OpenAIModelsState.None
                         OpenAIApi.ModelsResult.AzureDeploymentIdRequired -> OpenAIModelsState.None
                     }
                 }
+        }
+    }
+
+    private fun handleOpenAISettingsEvent(
+        event: OpenAISettingsEvent,
+        modelsState: MutableStateFlow<OpenAIModelsState>,
+        currentState: () -> OpenAISettingsState,
+        updateState: (OpenAISettingsState) -> Unit,
+        saveSettings: (OpenAISettings) -> Unit,
+    ) {
+        when (event) {
+            is OpenAISettingsEvent.LoadModels -> loadOpenAIModels(modelsState, event.settings)
+            is OpenAISettingsEvent.UpdateSettings -> saveSettings(event.settings)
+            is OpenAISettingsEvent.SwitchEditMode -> {
+                val current = currentState()
+                updateState(current.copy(isEditMode = event.enabled))
+            }
+            is OpenAISettingsEvent.ShowModelsError -> {
+                val current = currentState()
+                updateState(current.copy(showModelsError = event.show))
+            }
         }
     }
 
@@ -343,13 +451,22 @@ data class SettingsViewState(
     val maxLines: Int = 2,
     val showOnlyTitle: Boolean = false,
     val isOpenAdjacent: Boolean = true,
-    val openAIState: OpenAISettingsState = OpenAISettingsState(),
+    val summaryAIState: OpenAISettingsState = OpenAISettingsState(),
+    val translationApiState: TranslationApiSettingsState = TranslationApiSettingsState(),
+    val preferredTranslationLanguage: String = "",
+    val canTranslate: Boolean = false,
     val showReadingTime: Boolean = false,
     val showTitleUnreadCount: Boolean = false,
     val isOpenDrawerOnFab: Boolean = false,
+    val translateArticlePreviewsByDefault: Boolean = false,
+    val translateArticlesByDefault: Boolean = false,
+    val translationModelPairs: List<LanguagePairInfo> = emptyList(),
     val font: FontSelection = SystemDefault,
     val isPagingMode: Boolean = false,
     val isAnimatedPaging: Boolean = false,
+    val useInAppAudioPlayer: Boolean = true,
+    val forceSingleColumn: Boolean = true,
+    val applyBlocklistToLinks: Boolean = false,
 )
 
 data class UIFeedSettings(
@@ -368,14 +485,18 @@ data class OpenAISettingsState(
 sealed interface OpenAIModelsState {
     data object None : OpenAIModelsState
 
-    data object Loading : OpenAIModelsState
+    data class Loading(
+        val settings: OpenAISettings,
+    ) : OpenAIModelsState
 
     data class Success(
         val ids: List<String>,
+        val settings: OpenAISettings,
     ) : OpenAIModelsState
 
     data class Error(
         val message: String,
+        val settings: OpenAISettings,
     ) : OpenAIModelsState
 }
 
@@ -396,3 +517,9 @@ sealed interface OpenAISettingsEvent {
         val show: Boolean,
     ) : OpenAISettingsEvent
 }
+
+typealias TranslationApiSettingsState = OpenAISettingsState
+
+typealias TranslationApiModelsState = OpenAIModelsState
+
+typealias TranslationApiSettingsEvent = OpenAISettingsEvent

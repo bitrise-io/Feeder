@@ -94,6 +94,7 @@ open class OPMLImporter(
             UserSettings.SETTINGS_FILTER_READ -> settingsStore.setFeedListFilterRead(value.toBoolean())
             UserSettings.SETTINGS_LIST_SHOW_ONLY_TITLES -> settingsStore.setShowOnlyTitles(value.toBoolean())
             UserSettings.SETTING_OPEN_ADJACENT -> settingsStore.setOpenAdjacent(value.toBoolean())
+            UserSettings.SETTING_USE_IN_APP_AUDIO_PLAYER -> settingsStore.setUseInAppAudioPlayer(value.toBoolean())
             UserSettings.SETTING_PAGING_MODE -> settingsStore.setIsPagingMode(value.toBoolean())
             UserSettings.SETTING_ANIMATED_PAGING -> settingsStore.setIsAnimatedPaging(value.toBoolean())
             UserSettings.SETTING_FONT ->
@@ -106,7 +107,10 @@ open class OPMLImporter(
             UserSettings.SETTING_LIST_SHOW_READING_TIME -> settingsStore.setShowReadingTime(value.toBoolean())
             UserSettings.SETTING_OPEN_DRAWER_ON_FAB -> settingsStore.setOpenDrawerOnFab(value.toBoolean())
             UserSettings.SETTING_SHOW_TITLE_UNREAD_COUNT -> settingsStore.setShowTitleUnreadCount(value.toBoolean())
+            UserSettings.SETTINGS_FORCE_SINGLE_COLUMN -> settingsStore.setForceSingleColumn(value.toBoolean())
             UserSettings.SETTING_MAX_ITEM_COUNT_PER_FEED -> settingsStore.setMaxCountPerFeed(value.toIntOrNull() ?: 100)
+            UserSettings.SETTING_TRANSLATE_ARTICLE_PREVIEWS_BY_DEFAULT -> settingsStore.setTranslateArticlePreviewsByDefault(value.toBoolean())
+            UserSettings.SETTING_TRANSLATE_ARTICLES_BY_DEFAULT -> settingsStore.setTranslateArticlesByDefault(value.toBoolean())
 
             // OpenAI related settings
             UserSettings.SETTING_OPENAI_KEY,
@@ -129,7 +133,32 @@ open class OPMLImporter(
                     }
                 settingsStore.setOpenAiSettings(newSettings)
             }
+
+            UserSettings.SETTING_PREFERRED_TRANSLATION_LANGUAGE ->
+                settingsStore.setPreferredTranslationLanguage(value)
+
+            UserSettings.SETTING_TRANSLATION_API_KEY,
+            UserSettings.SETTING_TRANSLATION_API_MODEL_ID,
+            UserSettings.SETTING_TRANSLATION_API_URL,
+            UserSettings.SETTING_TRANSLATION_API_AZURE_VERSION,
+            UserSettings.SETTING_TRANSLATION_API_AZURE_DEPLOYMENT_ID,
+            UserSettings.SETTING_TRANSLATION_API_REQUEST_TIMEOUT_SECONDS,
+            -> {
+                val current = settingsStore.translationApiSettings.value
+                val newSettings =
+                    when (UserSettings.fromKey(key)) {
+                        UserSettings.SETTING_TRANSLATION_API_KEY -> current.copy(key = value)
+                        UserSettings.SETTING_TRANSLATION_API_MODEL_ID -> current.copy(modelId = value)
+                        UserSettings.SETTING_TRANSLATION_API_URL -> current.copy(baseUrl = value)
+                        UserSettings.SETTING_TRANSLATION_API_AZURE_VERSION -> current.copy(azureApiVersion = value)
+                        UserSettings.SETTING_TRANSLATION_API_AZURE_DEPLOYMENT_ID -> current.copy(azureDeploymentId = value)
+                        UserSettings.SETTING_TRANSLATION_API_REQUEST_TIMEOUT_SECONDS -> current.copy(timeoutSeconds = value.toIntOrNull() ?: 30)
+                        else -> current
+                    }
+                settingsStore.setTranslationApiSettings(newSettings)
+            }
             UserSettings.SETTING_BLOCKLIST_APPLY_TO_SUMMARIES -> settingsStore.setApplyBlocklistToSummaries(value.toBoolean())
+            UserSettings.SETTING_BLOCKLIST_APPLY_TO_LINKS -> settingsStore.setApplyBlocklistToLinks(value.toBoolean())
         }
     }
 

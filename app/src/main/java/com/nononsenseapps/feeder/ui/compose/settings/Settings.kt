@@ -31,6 +31,8 @@ import androidx.compose.material.LocalContentAlpha
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -43,6 +45,7 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -87,6 +90,7 @@ import com.nononsenseapps.feeder.archmodel.SortingOptions
 import com.nononsenseapps.feeder.archmodel.SwipeAsRead
 import com.nononsenseapps.feeder.archmodel.SyncFrequency
 import com.nononsenseapps.feeder.archmodel.ThemeOptions
+import com.nononsenseapps.feeder.localtranslation.LanguagePairInfo
 import com.nononsenseapps.feeder.ui.compose.components.safeSemantics
 import com.nononsenseapps.feeder.ui.compose.dialog.EditableListDialog
 import com.nononsenseapps.feeder.ui.compose.dialog.FeedNotificationsDialog
@@ -103,6 +107,25 @@ import com.nononsenseapps.feeder.util.ActivityLauncher
 import com.nononsenseapps.feeder.util.openGithubIssues
 import org.kodein.di.compose.LocalDI
 import org.kodein.di.instance
+import java.util.Locale
+
+private fun formatFileSize(bytes: Long): String {
+    val kb = bytes / 1024.0
+    val mb = kb / 1024.0
+    return when {
+        mb >= 1.0 -> "%.1f MB".format(mb)
+        kb >= 1.0 -> "%.0f KB".format(kb)
+        else -> "$bytes B"
+    }
+}
+
+private fun languageDisplayName(code: String): String =
+    runCatching {
+        Locale
+            .forLanguageTag(code)
+            .getDisplayLanguage(Locale.getDefault())
+            .replaceFirstChar { it.uppercase() }
+    }.getOrDefault(code)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -160,6 +183,8 @@ fun SettingsScreen(
             blockListValue = ImmutableHolder(viewState.blockList.sorted()),
             applyBlocklistToSummaries = viewState.applyBlocklistToSummaries,
             onApplyBlocklistToSummariesChange = settingsViewModel::setApplyBlocklistToSummaries,
+            applyBlocklistToLinks = viewState.applyBlocklistToLinks,
+            onApplyBlocklistToLinksChange = settingsViewModel::setApplyBlocklistToLinks,
             swipeAsReadValue = viewState.swipeAsRead,
             onSwipeAsReadOptionChange = settingsViewModel::setSwipeAsRead,
             syncOnStartupValue = viewState.syncOnResume,
@@ -182,6 +207,8 @@ fun SettingsScreen(
             onLinkOpenerChange = settingsViewModel::setLinkOpener,
             currentSyncFrequencyValue = viewState.syncFrequency,
             onSyncFrequencyChange = settingsViewModel::setSyncFrequency,
+            useInAppAudioPlayer = viewState.useInAppAudioPlayer,
+            onUseInAppAudioPlayerChange = settingsViewModel::setUseInAppAudioPlayer,
             batteryOptimizationIgnoredValue = viewState.batteryOptimizationIgnored,
             onOpenSyncSettings = onNavigateToSyncScreen,
             useDynamicTheme = viewState.useDynamicTheme,
@@ -205,10 +232,19 @@ fun SettingsScreen(
             onStartActivity = { intent ->
                 activityLauncher.startActivity(false, intent)
             },
-            openAIState = viewState.openAIState,
-            onOpenAIEvent = settingsViewModel::onOpenAISettingsEvent,
+            summaryAIState = viewState.summaryAIState,
+            onSummaryAIEvent = settingsViewModel::onSummaryOpenAISettingsEvent,
+            translationApiState = viewState.translationApiState,
+            onTranslationApiEvent = settingsViewModel::onTranslationApiSettingsEvent,
+            preferredTranslationLanguage = viewState.preferredTranslationLanguage,
+            onPreferredTranslationLanguageChange = settingsViewModel::setPreferredTranslationLanguage,
+            canTranslate = viewState.canTranslate,
             isOpenDrawerOnFab = viewState.isOpenDrawerOnFab,
             onOpenDrawerOnFab = settingsViewModel::setOpenDrawerOnFab,
+            translateArticlePreviewsByDefault = viewState.translateArticlePreviewsByDefault,
+            onTranslateArticlePreviewsByDefault = settingsViewModel::setTranslateArticlePreviewsByDefault,
+            translateArticlesByDefault = viewState.translateArticlesByDefault,
+            onTranslateArticlesByDefault = settingsViewModel::setTranslateArticlesByDefault,
             onTextSettings = onNavigateToTextSettingsScreen,
             currentFontSelection = viewState.font,
             isPagingMode = viewState.isPagingMode,
@@ -221,6 +257,12 @@ fun SettingsScreen(
                     intent = openGithubIssues(),
                 )
             },
+            downloadedLanguagePairs = viewState.translationModelPairs,
+            onDeleteLanguagePair = { source, target ->
+                settingsViewModel.deleteLanguagePair(source, target)
+            },
+            forceSingleColumn = viewState.forceSingleColumn,
+            onForceSingleColumnChange = settingsViewModel::setForceSingleColumn,
             modifier = Modifier.padding(padding),
         )
     }
@@ -245,6 +287,8 @@ private fun SettingsScreenPreview() {
             blockListValue = ImmutableHolder(emptyList()),
             applyBlocklistToSummaries = false,
             onApplyBlocklistToSummariesChange = {},
+            applyBlocklistToLinks = false,
+            onApplyBlocklistToLinksChange = {},
             swipeAsReadValue = SwipeAsRead.ONLY_FROM_END,
             onSwipeAsReadOptionChange = {},
             syncOnStartupValue = true,
@@ -267,6 +311,8 @@ private fun SettingsScreenPreview() {
             onLinkOpenerChange = {},
             currentSyncFrequencyValue = SyncFrequency.EVERY_12_HOURS,
             onSyncFrequencyChange = {},
+            useInAppAudioPlayer = true,
+            onUseInAppAudioPlayerChange = {},
             batteryOptimizationIgnoredValue = false,
             onOpenSyncSettings = {},
             useDynamicTheme = true,
@@ -288,10 +334,19 @@ private fun SettingsScreenPreview() {
             showTitleUnreadCount = false,
             onShowTitleUnreadCountChange = {},
             onStartActivity = {},
-            openAIState = OpenAISettingsState(),
-            onOpenAIEvent = {},
+            summaryAIState = OpenAISettingsState(),
+            onSummaryAIEvent = {},
+            translationApiState = TranslationApiSettingsState(),
+            onTranslationApiEvent = {},
+            preferredTranslationLanguage = "",
+            onPreferredTranslationLanguageChange = {},
+            canTranslate = false,
             isOpenDrawerOnFab = false,
             onOpenDrawerOnFab = {},
+            translateArticlePreviewsByDefault = false,
+            onTranslateArticlePreviewsByDefault = {},
+            translateArticlesByDefault = false,
+            onTranslateArticlesByDefault = {},
             onTextSettings = {},
             currentFontSelection = FontSelection.SystemDefault,
             isPagingMode = false,
@@ -299,6 +354,10 @@ private fun SettingsScreenPreview() {
             isAnimatedPaging = false,
             onIsAnimatedPagingChange = {},
             onSendFeedback = {},
+            downloadedLanguagePairs = emptyList(),
+            onDeleteLanguagePair = { _, _ -> },
+            forceSingleColumn = false,
+            onForceSingleColumnChange = {},
             modifier = Modifier,
         )
     }
@@ -319,6 +378,8 @@ fun SettingsList(
     blockListValue: ImmutableHolder<List<String>>,
     applyBlocklistToSummaries: Boolean,
     onApplyBlocklistToSummariesChange: (Boolean) -> Unit,
+    applyBlocklistToLinks: Boolean,
+    onApplyBlocklistToLinksChange: (Boolean) -> Unit,
     swipeAsReadValue: SwipeAsRead,
     onSwipeAsReadOptionChange: (SwipeAsRead) -> Unit,
     syncOnStartupValue: Boolean,
@@ -341,6 +402,8 @@ fun SettingsList(
     onLinkOpenerChange: (LinkOpener) -> Unit,
     currentSyncFrequencyValue: SyncFrequency,
     onSyncFrequencyChange: (SyncFrequency) -> Unit,
+    useInAppAudioPlayer: Boolean,
+    onUseInAppAudioPlayerChange: (Boolean) -> Unit,
     batteryOptimizationIgnoredValue: Boolean,
     onOpenSyncSettings: () -> Unit,
     useDynamicTheme: Boolean,
@@ -362,10 +425,19 @@ fun SettingsList(
     showTitleUnreadCount: Boolean,
     onShowTitleUnreadCountChange: (Boolean) -> Unit,
     onStartActivity: (intent: Intent) -> Unit,
-    openAIState: OpenAISettingsState,
-    onOpenAIEvent: (OpenAISettingsEvent) -> Unit,
+    summaryAIState: OpenAISettingsState,
+    onSummaryAIEvent: (OpenAISettingsEvent) -> Unit,
+    translationApiState: TranslationApiSettingsState,
+    onTranslationApiEvent: (TranslationApiSettingsEvent) -> Unit,
+    preferredTranslationLanguage: String,
+    onPreferredTranslationLanguageChange: (String) -> Unit,
+    canTranslate: Boolean,
     isOpenDrawerOnFab: Boolean,
     onOpenDrawerOnFab: (Boolean) -> Unit,
+    translateArticlePreviewsByDefault: Boolean,
+    onTranslateArticlePreviewsByDefault: (Boolean) -> Unit,
+    translateArticlesByDefault: Boolean,
+    onTranslateArticlesByDefault: (Boolean) -> Unit,
     currentFontSelection: FontSelection,
     isPagingMode: Boolean,
     onIsPagingModeChange: (Boolean) -> Unit,
@@ -373,6 +445,10 @@ fun SettingsList(
     onIsAnimatedPagingChange: (Boolean) -> Unit,
     onTextSettings: () -> Unit,
     onSendFeedback: () -> Unit,
+    downloadedLanguagePairs: List<LanguagePairInfo>,
+    onDeleteLanguagePair: (source: String, target: String) -> Unit,
+    forceSingleColumn: Boolean,
+    onForceSingleColumnChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val scrollState = rememberScrollState()
@@ -440,39 +516,57 @@ fun SettingsList(
                     .width(dimens.maxContentWidth),
         )
 
-        ListDialogSetting(
-            title = stringResource(id = R.string.block_list),
-            dialogTitle = {
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Text(
-                        text = stringResource(id = R.string.block_list),
-                        style = MaterialTheme.typography.titleLarge,
-                    )
-                    Text(
-                        text = stringResource(id = R.string.block_list_description),
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    Text(
-                        text = "feeder feed?r fe*er",
-                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = LocalTypographySettings.current.monoFontFamily),
-                    )
-                }
-            },
-            currentValue = blockListValue,
-            showToggle = true,
-            toggleValue = applyBlocklistToSummaries,
-            toggleLabel = stringResource(id = R.string.apply_blocklist_to_summaries),
-            onAddItem = onBlockListAdd,
-            onRemoveItem = onBlockListRemove,
-            onToggleChange = onApplyBlocklistToSummariesChange,
-        )
-
         NotificationsSetting(
             items = feedsSettings,
             onToggleItem = onToggleNotification,
         )
+
+        HorizontalDivider(modifier = Modifier.width(dimens.maxContentWidth))
+
+        SettingsGroup(
+            title = R.string.block_list,
+        ) {
+            ListDialogSetting(
+                title = stringResource(id = R.string.filters),
+                dialogTitle = {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            text = stringResource(id = R.string.filters),
+                            style = MaterialTheme.typography.titleLarge,
+                        )
+                        Text(
+                            text = stringResource(id = R.string.block_list_description),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Text(
+                            text = "feeder feed?r fe*er",
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = LocalTypographySettings.current.monoFontFamily),
+                        )
+                    }
+                },
+                currentValue = blockListValue,
+                showToggle = false,
+                toggleValue = false,
+                toggleLabel = "",
+                onAddItem = onBlockListAdd,
+                onRemoveItem = onBlockListRemove,
+                onToggleChange = {},
+            )
+
+            SwitchSetting(
+                title = stringResource(id = R.string.apply_blocklist_to_summaries),
+                checked = applyBlocklistToSummaries,
+                onCheckedChange = onApplyBlocklistToSummariesChange,
+            )
+
+            SwitchSetting(
+                title = stringResource(id = R.string.apply_blocklist_to_links),
+                checked = applyBlocklistToLinks,
+                onCheckedChange = onApplyBlocklistToLinksChange,
+            )
+        }
 
         HorizontalDivider(modifier = Modifier.width(dimens.maxContentWidth))
 
@@ -663,6 +757,12 @@ fun SettingsList(
                 checked = showTitleUnreadCount,
                 onCheckedChange = onShowTitleUnreadCountChange,
             )
+
+            SwitchSetting(
+                title = stringResource(id = R.string.force_single_column),
+                checked = forceSingleColumn,
+                onCheckedChange = onForceSingleColumnChange,
+            )
         }
 
         HorizontalDivider(modifier = Modifier.width(dimens.maxContentWidth))
@@ -701,6 +801,13 @@ fun SettingsList(
                 modifier =
                     Modifier
                         .width(dimens.maxContentWidth),
+            )
+
+            SwitchSetting(
+                title = stringResource(id = R.string.use_in_app_audio_player),
+                checked = useInAppAudioPlayer,
+                onCheckedChange = onUseInAppAudioPlayerChange,
+                description = stringResource(id = R.string.use_in_app_audio_player_description),
             )
 
             val notCompactScreen = LocalConfiguration.current.smallestScreenWidthDp >= 600
@@ -760,10 +867,69 @@ fun SettingsList(
         SettingsGroup(
             title = R.string.openai_settings,
         ) {
+            var pendingDeletedLanguagePairs by remember { mutableStateOf(emptySet<Pair<String, String>>()) }
+            val visibleDownloadedLanguagePairs =
+                remember(downloadedLanguagePairs, pendingDeletedLanguagePairs) {
+                    downloadedLanguagePairs.filterNot { pair ->
+                        pair.sourceLanguage to pair.targetLanguage in pendingDeletedLanguagePairs
+                    }
+                }
+
             OpenAISection(
-                state = openAIState,
-                onEvent = onOpenAIEvent,
+                title = stringResource(R.string.summary_api_settings),
+                info = stringResource(R.string.summary_api_settings_info),
+                state = summaryAIState,
+                onEvent = onSummaryAIEvent,
+                section = OpenAISectionType.Summary,
             )
+
+            TranslationApiSection(
+                title = stringResource(R.string.translation_api_settings),
+                info = stringResource(R.string.translation_api_settings_info),
+                state = translationApiState,
+                onEvent = onTranslationApiEvent,
+                preferredTranslationLanguage = preferredTranslationLanguage,
+                onPreferredTranslationLanguageChange = onPreferredTranslationLanguageChange,
+                onLocalTranslationContentSave = {
+                    pendingDeletedLanguagePairs.forEach { (source, target) ->
+                        onDeleteLanguagePair(source, target)
+                    }
+                    pendingDeletedLanguagePairs = emptySet()
+                },
+                onLocalTranslationContentDismiss = {
+                    pendingDeletedLanguagePairs = emptySet()
+                },
+                localTranslationContent = {
+                    if (canTranslate && visibleDownloadedLanguagePairs.isNotEmpty()) {
+                        DownloadedModelsSection(
+                            downloadedLanguagePairs = visibleDownloadedLanguagePairs,
+                            onDeletePair = { source, target ->
+                                pendingDeletedLanguagePairs += source to target
+                            },
+                            onDeleteAll = {
+                                pendingDeletedLanguagePairs +=
+                                    visibleDownloadedLanguagePairs.map { pair ->
+                                        pair.sourceLanguage to pair.targetLanguage
+                                    }
+                            },
+                        )
+                    }
+                },
+            )
+
+            if (canTranslate) {
+                SwitchSetting(
+                    title = stringResource(id = R.string.translate_feed_cards_by_default),
+                    checked = translateArticlePreviewsByDefault,
+                    onCheckedChange = onTranslateArticlePreviewsByDefault,
+                )
+
+                SwitchSetting(
+                    title = stringResource(id = R.string.translate_articles_by_default),
+                    checked = translateArticlesByDefault,
+                    onCheckedChange = onTranslateArticlesByDefault,
+                )
+            }
         }
 
         HorizontalDivider(modifier = Modifier.width(dimens.maxContentWidth))
@@ -1472,3 +1638,149 @@ fun SwipeAsRead.asSwipeAsReadOption() =
         swipeAsRead = this,
         name = stringResource(id = stringId),
     )
+
+@Composable
+private fun DownloadedModelsSection(
+    downloadedLanguagePairs: List<LanguagePairInfo>,
+    onDeletePair: (source: String, target: String) -> Unit,
+    onDeleteAll: () -> Unit,
+) {
+    var deleteConfirmPair by remember { mutableStateOf<LanguagePairInfo?>(null) }
+    var showDeleteAllConfirm by remember { mutableStateOf(false) }
+
+    if (deleteConfirmPair != null) {
+        AlertDialog(
+            onDismissRequest = { deleteConfirmPair = null },
+            title = { Text(stringResource(R.string.delete_model_pair)) },
+            text = {
+                val pair = deleteConfirmPair!!
+                Text(
+                    stringResource(
+                        R.string.delete_model_pair_desc,
+                        languageDisplayName(pair.sourceLanguage),
+                        languageDisplayName(pair.targetLanguage),
+                        formatFileSize(pair.sizeBytes),
+                    ),
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onDeletePair(deleteConfirmPair!!.sourceLanguage, deleteConfirmPair!!.targetLanguage)
+                    deleteConfirmPair = null
+                }) {
+                    Text(stringResource(R.string.delete_model_pair))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteConfirmPair = null }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            },
+        )
+    }
+
+    if (showDeleteAllConfirm) {
+        val totalSize = downloadedLanguagePairs.sumOf { it.sizeBytes }
+        AlertDialog(
+            onDismissRequest = { showDeleteAllConfirm = false },
+            title = { Text(stringResource(R.string.delete_all_models)) },
+            text = {
+                Text(
+                    stringResource(
+                        R.string.delete_all_models_desc,
+                        downloadedLanguagePairs.size,
+                        formatFileSize(totalSize),
+                    ),
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onDeleteAll()
+                    showDeleteAllConfirm = false
+                }) {
+                    Text(stringResource(R.string.delete_model_pair))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteAllConfirm = false }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            },
+        )
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = stringResource(R.string.downloaded_translation_models),
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
+        )
+        Text(
+            text = stringResource(R.string.downloaded_translation_models_desc),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        Spacer(Modifier.height(8.dp))
+
+        for (pair in downloadedLanguagePairs) {
+            Row(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "${languageDisplayName(pair.sourceLanguage)} → ${languageDisplayName(pair.targetLanguage)}",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        text = formatFileSize(pair.sizeBytes),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                IconButton(onClick = { deleteConfirmPair = pair }) {
+                    Icon(
+                        imageVector = Icons.Outlined.Delete,
+                        contentDescription = stringResource(R.string.delete_model_pair),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        if (downloadedLanguagePairs.size > 1) {
+            val totalSize = downloadedLanguagePairs.sumOf { it.sizeBytes }
+            Row(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.delete_all_models),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        text = formatFileSize(totalSize),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                IconButton(onClick = { showDeleteAllConfirm = true }) {
+                    Icon(
+                        imageVector = Icons.Outlined.Delete,
+                        contentDescription = stringResource(R.string.delete_all_models),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}

@@ -1,14 +1,23 @@
 #!/bin/bash -eu
 
+GIT_CLIFF_TAG_PATTERN="^[0-9]+\.[0-9]+\.[0-9]+$"
+export GIT_CLIFF_TAG_PATTERN
+
 TARGET="${1:-HEAD}"
 
 current_default="$(git describe --tags --abbrev=0 "${TARGET}")"
 
-echo >&2 -n "Current version [${current_default}]"
+NEXT_VERSION="$(git cliff --bumped-version 2>/dev/null)"
+if git tag --list | grep -qx "${NEXT_VERSION}"; then
+  SUFFIX=1
+  while git tag --list | grep -qx "${NEXT_VERSION}-${SUFFIX}"; do
+    SUFFIX=$(( SUFFIX + 1 ))
+  done
+  NEXT_VERSION="${NEXT_VERSION}-${SUFFIX}"
+fi
 
-NEXT_VERSION="$(git cliff --bumped-version)"
-echo >&2 -n "Next version [${NEXT_VERSION}]. Press any key to continue..."
-read -r
+echo >&2 "Current version [${current_default}]"
+echo >&2 "Next version [${NEXT_VERSION}]"
 
 CURRENT_CODE="$(grep --perl-regexp "versionCode = \d" app/build.gradle.kts | sed "s|\s*versionCode = \([0-9]\+\)|\\1|")"
 echo >&2 "Current code [${CURRENT_CODE}]"
@@ -36,13 +45,13 @@ then
   git add app/src/main/res/xml/locales_config.xml
 fi
 
-CL="$(git cliff --bump --unreleased --strip all)"
+CL="$(git cliff --bump --unreleased --strip all 2>/dev/null)"
 echo >&2 "${CL}"
 
 read -r -p "Write changelog? [y/N] " response
 if [[ "$response" =~ ^[yY]$ ]]
 then
-  git cliff --bump -o CHANGELOG.md
+  git cliff --bump -o CHANGELOG.md 2>/dev/null
   git add CHANGELOG.md
 fi
 

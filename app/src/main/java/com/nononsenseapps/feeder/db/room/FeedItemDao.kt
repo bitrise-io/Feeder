@@ -79,6 +79,9 @@ interface FeedItemDao {
     @Query("SELECT * FROM feed_items WHERE id IS :id")
     suspend fun loadFeedItem(id: Long): FeedItem?
 
+    @Query("SELECT * FROM feed_items WHERE link IS :link ORDER BY id LIMIT 1")
+    suspend fun loadFeedItemByLink(link: String): FeedItem?
+
     @Query(
         """
         SELECT $FEED_ITEM_COLUMNS_WITH_FEED
@@ -349,12 +352,6 @@ interface FeedItemDao {
         readTime: Instant = Instant.now(),
     )
 
-    @Query("UPDATE feed_items SET read_time = coalesce(read_time, :readTime), notified = 1 WHERE id IS :id")
-    suspend fun markAsRead(
-        id: Long,
-        readTime: Instant = Instant.now(),
-    )
-
     @Query("UPDATE feed_items SET read_time = null WHERE id IS :id")
     suspend fun markAsUnread(id: Long)
 
@@ -369,6 +366,21 @@ interface FeedItemDao {
         id: Long,
         bookmarked: Boolean,
     )
+
+    @Query("UPDATE feed_items SET bookmarked = 1 WHERE link IN (:links)")
+    suspend fun setBookmarkedByLinks(links: List<String>): Int
+
+    @Query(
+        """
+        SELECT $FEED_ITEM_COLUMNS_WITH_FEED
+        FROM feed_items
+        LEFT JOIN feeds ON feed_items.feed_id = feeds.id
+        WHERE bookmarked = 1
+          AND link IS NOT NULL
+        ORDER BY link
+        """,
+    )
+    suspend fun getBookmarkedItemsForExport(): List<FeedItemWithFeed>
 
     @Query("SELECT link FROM feed_items WHERE bookmarked = 1 order by link")
     suspend fun getLinksOfBookmarks(): List<String>

@@ -52,13 +52,9 @@ class SyncRemoteStore(
         readStatusDao.deleteAll()
     }
 
-    suspend fun deleteReadStatusSyncs(ids: List<Long>) {
-        readStatusDao.deleteReadStatusSyncs(ids)
+    suspend fun deleteAppliedRemoteReadMarks(ids: List<Long>) {
+        remoteReadMarkDao.deleteByIds(ids)
     }
-
-    fun getNextFeedItemWithoutSyncedReadMark(): Flow<FeedItemForReadMark?> = readStatusDao.getNextFeedItemWithoutSyncedReadMark()
-
-    fun getFlowOfFeedItemsWithoutSyncedReadMark(): Flow<List<FeedItemForReadMark>> = readStatusDao.getFlowOfFeedItemsWithoutSyncedReadMark()
 
     suspend fun getFeedItemsWithoutSyncedReadMark(): List<FeedItemForReadMark> = readStatusDao.getFeedItemsWithoutSyncedReadMark()
 
@@ -97,6 +93,10 @@ class SyncRemoteStore(
         remoteReadMarkDao.deleteStaleRemoteReadMarks(now.minus(7, ChronoUnit.DAYS))
     }
 
+    suspend fun deleteRemoteReadMarksForReadItems() {
+        remoteReadMarkDao.deleteRemoteReadMarksForReadItems()
+    }
+
     suspend fun getRemoteReadMarksReadyToBeApplied() = remoteReadMarkDao.getRemoteReadMarksReadyToBeApplied()
 
     suspend fun getGuidsWhichAreSyncedAsReadInFeed(feedUrl: URL) = remoteReadMarkDao.getGuidsWhichAreSyncedAsReadInFeed(feedUrl = feedUrl)
@@ -129,6 +129,6 @@ class SyncRemoteStore(
     }
 
     companion object {
-        private const val LOG_TAG = "FEEDER_SyncRemoteStore"
+        private const val LOG_TAG = "FEEDER_SYNC_REMOTE"
     }
 }

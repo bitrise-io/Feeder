@@ -49,6 +49,9 @@
 # Charset detection
 -keep class com.ibm.icu.** { *; }
 
+# For WorkManager - InputMerger subclasses are instantiated by name via reflection
+-keep class * extends androidx.work.InputMerger { <init>(); }
+
 # For Kodein
 -keep, allowobfuscation, allowoptimization class org.kodein.type.TypeReference
 -keep, allowobfuscation, allowoptimization class org.kodein.type.JVMAbstractTypeToken$Companion$WrappingTest
@@ -75,4 +78,15 @@
 -dontwarn org.openjsse.javax.net.ssl.SSLSocket
 -dontwarn org.openjsse.net.ssl.OpenJSSE
 -dontwarn org.slf4j.impl.StaticLoggerBinder
-
+-dontwarn com.google.re2j.Matcher
+-dontwarn com.google.re2j.Pattern
+-dontwarn com.sun.source.doctree.DocTree
+-dontwarn com.sun.source.doctree.DocTreeVisitor
+-dontwarn com.sun.source.doctree.TextTree
+-dontwarn com.sun.source.doctree.UnknownBlockTagTree
+-dontwarn com.sun.source.doctree.UnknownInlineTagTree
+-dontwarn com.sun.source.util.SimpleDocTreeVisitor
+-dontwarn javax.lang.model.element.Element
+-dontwarn javax.lang.model.element.ElementKind
+-dontwarn jdk.javadoc.doclet.Taglet$Location
+-dontwarn jdk.javadoc.doclet.Taglet

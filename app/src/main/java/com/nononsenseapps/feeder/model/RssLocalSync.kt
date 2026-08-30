@@ -13,6 +13,7 @@ import com.nononsenseapps.feeder.db.room.ID_UNSET
 import com.nononsenseapps.feeder.sync.SyncRestClient
 import com.nononsenseapps.feeder.util.Either
 import com.nononsenseapps.feeder.util.FilePathProvider
+import com.nononsenseapps.feeder.util.fetchOgImage
 import com.nononsenseapps.feeder.util.flatMap
 import com.nononsenseapps.feeder.util.left
 import com.nononsenseapps.feeder.util.logDebug
@@ -34,7 +35,9 @@ import org.kodein.di.DIAware
 import org.kodein.di.instance
 import java.io.IOException
 import java.net.URL
+import java.time.Clock
 import java.time.Instant
+import java.time.ZoneOffset
 import java.time.temporal.ChronoUnit
 import java.util.concurrent.Executors
 import kotlin.math.max
@@ -301,7 +304,7 @@ class RssLocalSync(
 
                     val alreadyReadGuids = repository.getGuidsWhichAreSyncedAsReadInFeed(feedSql)
 
-                    val feedItemSqls =
+                    val itemsWithGuids =
                         items
                             ?.map {
                                 val guid =
@@ -311,8 +314,26 @@ class RssLocalSync(
                                     }
 
                                 it to guid
+                                // Feed convention: items are listed newest-first.
+                                // Reverse so we process oldest-first, giving items at higher
+                                // indices (earlier in the feed) a more recent fallback timestamp.
                             }?.reversed()
-                            ?.mapNotNull { (item, guid) ->
+                            ?: emptyList()
+
+                    val totalItems = itemsWithGuids.size
+
+                    val feedItemSqls =
+                        itemsWithGuids
+                            .mapIndexedNotNull { index, (item, guid) ->
+                                // Each undated item in the feed gets a distinct fallback clock.
+                                // Items are in reversed feed order here (oldest position = index 0),
+                                // so higher indices correspond to items that appeared earlier in the feed
+                                // and should therefore be considered more recent.
+                                val fallbackClock =
+                                    Clock.fixed(
+                                        downloadTime.minusSeconds((totalItems - 1 - index).toLong()),
+                                        ZoneOffset.UTC,
+                                    )
                                 // Always attempt to load existing items using both id schemes
                                 // Id is rewritten to preferred on update
                                 val feedItemSql =
@@ -333,8 +354,17 @@ class RssLocalSync(
                                         link = item.url,
                                     )
                                 ) {
-                                    feedItemSql.updateFromParsedEntry(item, guid, feed)
+                                    feedItemSql.updateFromParsedEntry(item, guid, feed, fallbackClock)
                                     feedItemSql.feedId = feedSql.id
+
+                                    if (feedSql.fetchOgImages) {
+                                        feedItemSql.thumbnailImage =
+                                            resolveThumbnailImage(
+                                                current = feedItemSql.thumbnailImage,
+                                                articleUrl = item.url,
+                                                hasFeedImage = item.hasFeedImage,
+                                            )
+                                    }
 
                                     if (feedItemSql.guid in alreadyReadGuids) {
                                         // TODO get read time from sync service
@@ -356,6 +386,11 @@ class RssLocalSync(
                             .use {
                                 it.write(text)
                             }
+                        // If this item was pre-marked as read from a remote read-mark (alreadyReadGuids),
+                        // immediately set it as synced so it won't be echoed back to the server.
+                        if (feedItem.guid in alreadyReadGuids) {
+                            repository.setSynced(feedItem.id)
+                        }
                     }
                     // Try to look for image if not done before
                     if (feedSql.imageUrl == null && feedSql.siteFetched == Instant.EPOCH) {
@@ -495,8 +530,33 @@ class RssLocalSync(
                 }
         }
 
+    /**
+     * Final thumbnail priority policy:
+     * 1) Keep feed-provided thumbnail (media/enclosure/etc) when it's not body-derived.
+     * 2) Otherwise try og:image from article <head>.
+     * 3) If no og:image found, keep current value (body fallback or null).
+     */
+    private suspend fun resolveThumbnailImage(
+        current: ThumbnailImage?,
+        articleUrl: String?,
+        hasFeedImage: Boolean,
+    ): ThumbnailImage? {
+        val url = articleUrl?.trim()?.takeIf { it.isNotEmpty() } ?: return current
+        if (!ThumbnailImagePolicy.shouldFetchOgImage(current, url, hasFeedImage)) return current
+
+        val ogImage =
+            try {
+                okHttpClient.fetchOgImage(url)
+            } catch (e: Exception) {
+                logDebug(LOG_TAG, "Failed to fetch og:image for $url", e)
+                null
+            }
+
+        return ThumbnailImagePolicy.applyOgImage(current, ogImage)
+    }
+
     companion object {
-        private const val LOG_TAG = "FEEDER_RssLocalSync"
+        private const val LOG_TAG = "FEEDER_RSS_LOCAL_SYNC"
     }
 }
 

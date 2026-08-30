@@ -65,6 +65,7 @@ import androidx.compose.material3.PlainTooltip
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SearchBar
 import androidx.compose.material3.SearchBarDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TooltipBox
 import androidx.compose.material3.TooltipDefaults
@@ -114,17 +115,23 @@ import com.nononsenseapps.feeder.archmodel.FeedType
 import com.nononsenseapps.feeder.db.room.FeedItemCursor
 import com.nononsenseapps.feeder.db.room.ID_SAVED_ARTICLES
 import com.nononsenseapps.feeder.db.room.ID_UNSET
+import com.nononsenseapps.feeder.localtranslation.BergamotModelDownloadProgress
 import com.nononsenseapps.feeder.model.LocaleOverride
 import com.nononsenseapps.feeder.model.export.exportSavedArticles
+import com.nononsenseapps.feeder.model.export.importSavedArticles
 import com.nononsenseapps.feeder.model.opml.exportOpml
 import com.nononsenseapps.feeder.model.opml.importOpml
+import com.nononsenseapps.feeder.ui.compose.components.TranslationProgressContent
 import com.nononsenseapps.feeder.ui.compose.components.safeSemantics
 import com.nononsenseapps.feeder.ui.compose.deletefeed.DeletableFeed
 import com.nononsenseapps.feeder.ui.compose.deletefeed.DeleteFeedDialog
+import com.nononsenseapps.feeder.ui.compose.dialog.RenameTagDialog
 import com.nononsenseapps.feeder.ui.compose.empty.NothingToRead
 import com.nononsenseapps.feeder.ui.compose.feedarticle.FeedListFilterCallback
 import com.nononsenseapps.feeder.ui.compose.feedarticle.FeedScreenViewState
 import com.nononsenseapps.feeder.ui.compose.feedarticle.FeedViewModel
+import com.nononsenseapps.feeder.ui.compose.feedarticle.HideablePodcastPlayer
+import com.nononsenseapps.feeder.ui.compose.feedarticle.TranslatedFeedCards
 import com.nononsenseapps.feeder.ui.compose.feedarticle.onlyUnread
 import com.nononsenseapps.feeder.ui.compose.feedarticle.onlyUnreadAndSaved
 import com.nononsenseapps.feeder.ui.compose.material3.DrawerState
@@ -150,6 +157,7 @@ import com.nononsenseapps.feeder.ui.compose.utils.onKeyEventLikeEscape
 import com.nononsenseapps.feeder.util.ActivityLauncher
 import com.nononsenseapps.feeder.util.ToastMaker
 import com.nononsenseapps.feeder.util.logDebug
+import com.nononsenseapps.feeder.util.stripTrackingParameters
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.kodein.di.compose.LocalDI
@@ -172,13 +180,14 @@ fun FeedScreen(
 ) {
     val toastMaker: ToastMaker by instance()
     val viewState: FeedScreenViewState by viewModel.viewState.collectAsStateWithLifecycle()
+    val translatedFeedCards by viewModel.translatedFeedCards.collectAsStateWithLifecycle()
     val pagedFeedItems = viewModel.currentFeedListItems.collectAsLazyPagingItems()
     val pagedNavDrawerItems = viewModel.pagedNavDrawerItems.collectAsLazyPagingItems()
 
     val di = LocalDI.current
     val savedArticleExporter =
         rememberLauncherForActivityResult(
-            ActivityResultContracts.CreateDocument("text/x-opml"),
+            ActivityResultContracts.CreateDocument("application/json"),
         ) { uri ->
             if (uri != null) {
                 val applicationCoroutineScope: ApplicationCoroutineScope by di.instance()
@@ -206,6 +215,17 @@ fun FeedScreen(
                 val applicationCoroutineScope: ApplicationCoroutineScope by di.instance()
                 applicationCoroutineScope.launch {
                     importOpml(di, uri)
+                }
+            }
+        }
+    val savedArticleImporter =
+        rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenDocument(),
+        ) { uri ->
+            if (uri != null) {
+                val applicationCoroutineScope: ApplicationCoroutineScope by di.instance()
+                applicationCoroutineScope.launch {
+                    importSavedArticles(di, uri)
                 }
             }
         }
@@ -296,6 +316,12 @@ fun FeedScreen(
             ttsOnStop = viewModel::ttsStop,
             ttsOnSkipNext = viewModel::ttsSkipNext,
             ttsOnSelectLanguage = viewModel::ttsOnSelectLanguage,
+            podcastOnPlay = viewModel::podcastPlay,
+            podcastOnPause = viewModel::podcastPause,
+            podcastOnStop = viewModel::podcastStop,
+            podcastOnSeekBack = { viewModel.podcastSeekBy(-10_000) },
+            podcastOnSeekForward = { viewModel.podcastSeekBy(10_000) },
+            podcastOnSeekTo = viewModel::podcastSeekTo,
             onAddFeed = { SearchFeedDestination.navigate(navController) },
             onEditFeed = { feedId ->
                 EditFeedDestination.navigate(navController, feedId)
@@ -309,11 +335,20 @@ fun FeedScreen(
             onDeleteFeeds = { feedIds ->
                 viewModel.deleteFeeds(feedIds.toList())
             },
+            onRenameTag = { oldTag, newTag ->
+                viewModel.renameTag(oldTag, newTag)
+            },
             onShowDeleteDialog = {
                 viewModel.setShowDeleteDialog(true)
             },
             onDismissDeleteDialog = {
                 viewModel.setShowDeleteDialog(false)
+            },
+            onShowRenameTagDialog = {
+                viewModel.setShowRenameTagDialog(true)
+            },
+            onDismissRenameTagDialog = {
+                viewModel.setShowRenameTagDialog(false)
             },
             onSettings = {
                 SettingsDestination.navigate(navController)
@@ -327,6 +362,7 @@ fun FeedScreen(
                             "text/x-opml",
                             "application/xml",
                             // This is the mimetype the file actually gets when exported
+                            "application/json",
                             "application/octet-stream",
                             // But just in case a file isn't named right etc, accept all
                             "*/*",
@@ -349,12 +385,30 @@ fun FeedScreen(
                     }
                 }
             },
+            onImportSavedArticles = {
+                try {
+                    savedArticleImporter.launch(
+                        arrayOf(
+                            "text/plain",
+                            // This is the mimetype the file may get from older exports
+                            "application/octet-stream",
+                            // But just in case a file isn't named right etc, accept all
+                            "*/*",
+                        ),
+                    )
+                } catch (_: Exception) {
+                    // ActivityNotFoundException in particular
+                    coroutineScope.launch {
+                        toastMaker.makeToast(R.string.failed_to_import_saved_articles)
+                    }
+                }
+            },
             onExportSavedArticles = {
                 try {
                     savedArticleExporter.launch(
                         "feeder-saved-articles-${LocalDate.now()}-${
                             LocalTime.now().toSecondOfDay()
-                        }.txt",
+                        }.json",
                     )
                 } catch (_: Exception) {
                     // ActivityNotFoundException in particular
@@ -456,6 +510,8 @@ fun FeedScreen(
             feedListState = feedListState,
             feedGridState = feedGridState,
             pagedFeedItems = pagedFeedItems,
+            translatedFeedCards = translatedFeedCards,
+            onTranslateFeedCard = viewModel::translateFeedCardIfNeeded,
         )
     }
 }
@@ -473,6 +529,12 @@ fun FeedScreen(
     ttsOnStop: () -> Unit,
     ttsOnSkipNext: () -> Unit,
     ttsOnSelectLanguage: (LocaleOverride) -> Unit,
+    podcastOnPlay: () -> Unit,
+    podcastOnPause: () -> Unit,
+    podcastOnStop: () -> Unit,
+    podcastOnSeekBack: () -> Unit,
+    podcastOnSeekForward: () -> Unit,
+    podcastOnSeekTo: (Int) -> Unit,
     onAddFeed: () -> Unit,
     onEditFeed: (Long) -> Unit,
     onShowEditDialog: () -> Unit,
@@ -480,9 +542,13 @@ fun FeedScreen(
     onDeleteFeeds: (Iterable<Long>) -> Unit,
     onShowDeleteDialog: () -> Unit,
     onDismissDeleteDialog: () -> Unit,
+    onRenameTag: (String, String) -> Unit,
+    onShowRenameTagDialog: () -> Unit,
+    onDismissRenameTagDialog: () -> Unit,
     onSettings: () -> Unit,
     onImport: () -> Unit,
     onExportOPML: () -> Unit,
+    onImportSavedArticles: () -> Unit,
     onExportSavedArticles: () -> Unit,
     drawerState: DrawerState,
     markAsUnread: (Long, Boolean) -> Unit,
@@ -501,6 +567,8 @@ fun FeedScreen(
     feedListState: LazyListState,
     feedGridState: LazyStaggeredGridState,
     pagedFeedItems: LazyPagingItems<FeedListItem>,
+    translatedFeedCards: TranslatedFeedCards,
+    onTranslateFeedCard: (FeedListItem) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val coroutineScope = rememberCoroutineScope()
@@ -533,8 +601,17 @@ fun FeedScreen(
         ttsOnStop = ttsOnStop,
         ttsOnSkipNext = ttsOnSkipNext,
         ttsOnSelectLanguage = ttsOnSelectLanguage,
+        podcastOnPlay = podcastOnPlay,
+        podcastOnPause = podcastOnPause,
+        podcastOnStop = podcastOnStop,
+        podcastOnSeekBack = podcastOnSeekBack,
+        podcastOnSeekForward = podcastOnSeekForward,
+        podcastOnSeekTo = podcastOnSeekTo,
         onDismissDeleteDialog = onDismissDeleteDialog,
         onDismissEditDialog = onDismissEditDialog,
+        onRenameTag = onRenameTag,
+        onShowRenameTagDialog = onShowRenameTagDialog,
+        onDismissRenameTagDialog = onDismissRenameTagDialog,
         onDelete = onDeleteFeeds,
         onEditFeed = onEditFeed,
         toolbarActions = {
@@ -842,6 +919,24 @@ fun FeedScreen(
                                     Text(stringResource(id = R.string.delete_feed))
                                 },
                             )
+                            if (viewState.feedScreenTitle.type == FeedType.TAG && !viewState.currentFeedOrTag.isFeed) {
+                                HorizontalDivider()
+                                DropdownMenuItem(
+                                    onClick = {
+                                        onShowToolbarMenu(false)
+                                        onShowRenameTagDialog()
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Default.Edit,
+                                            contentDescription = null,
+                                        )
+                                    },
+                                    text = {
+                                        Text(stringResource(id = R.string.rename_tag))
+                                    },
+                                )
+                            }
                             HorizontalDivider()
                             DropdownMenuItem(
                                 onClick = {
@@ -871,6 +966,21 @@ fun FeedScreen(
                                 },
                                 text = {
                                     Text(stringResource(id = R.string.export_feeds_to_opml))
+                                },
+                            )
+                            DropdownMenuItem(
+                                onClick = {
+                                    onShowToolbarMenu(false)
+                                    onImportSavedArticles()
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Default.ImportExport,
+                                        contentDescription = null,
+                                    )
+                                },
+                                text = {
+                                    Text(stringResource(id = R.string.import_saved_articles))
                                 },
                             )
                             DropdownMenuItem(
@@ -955,6 +1065,8 @@ fun FeedScreen(
                     onSetBookmark = onSetBookmark,
                     gridState = feedGridState,
                     pagedFeedItems = pagedFeedItems,
+                    translatedFeedCards = translatedFeedCards,
+                    onTranslateFeedCard = onTranslateFeedCard,
                     modifier = innerModifier,
                 )
 
@@ -982,6 +1094,8 @@ fun FeedScreen(
                     onSetBookmark = onSetBookmark,
                     listState = feedListState,
                     pagedFeedItems = pagedFeedItems,
+                    translatedFeedCards = translatedFeedCards,
+                    onTranslateFeedCard = onTranslateFeedCard,
                     modifier = innerModifier,
                 )
         }
@@ -1002,8 +1116,17 @@ fun FeedScreen(
     ttsOnStop: () -> Unit,
     ttsOnSkipNext: () -> Unit,
     ttsOnSelectLanguage: (LocaleOverride) -> Unit,
+    podcastOnPlay: () -> Unit,
+    podcastOnPause: () -> Unit,
+    podcastOnStop: () -> Unit,
+    podcastOnSeekBack: () -> Unit,
+    podcastOnSeekForward: () -> Unit,
+    podcastOnSeekTo: (Int) -> Unit,
     onDismissDeleteDialog: () -> Unit,
     onDismissEditDialog: () -> Unit,
+    onRenameTag: (String, String) -> Unit,
+    onShowRenameTagDialog: () -> Unit,
+    onDismissRenameTagDialog: () -> Unit,
     onDelete: (Iterable<Long>) -> Unit,
     onEditFeed: (Long) -> Unit,
     toolbarActions: @Composable (RowScope.() -> Unit),
@@ -1114,21 +1237,34 @@ fun FeedScreen(
             )
         },
         bottomBar = {
-            HideableTTSPlayer(
-                visibleState = bottomBarVisibleState,
-                currentlyPlaying = viewState.isTTSPlaying,
-                onPlay = ttsOnPlay,
-                onPause = ttsOnPause,
-                onStop = ttsOnStop,
-                onSkipNext = ttsOnSkipNext,
-                languages = ImmutableHolder(viewState.ttsLanguages),
-                onSelectLanguage = ttsOnSelectLanguage,
-                floatingActionButton =
-                    when (viewState.showFab) {
-                        true -> floatingActionButton
-                        false -> null
-                    },
-            )
+            if (viewState.podcastPlayerState.isVisible) {
+                HideablePodcastPlayer(
+                    visibleState = bottomBarVisibleState,
+                    viewState = viewState.podcastPlayerState,
+                    onPlay = podcastOnPlay,
+                    onPause = podcastOnPause,
+                    onStop = podcastOnStop,
+                    onSeekBack = podcastOnSeekBack,
+                    onSeekForward = podcastOnSeekForward,
+                    onSeekTo = podcastOnSeekTo,
+                )
+            } else {
+                HideableTTSPlayer(
+                    visibleState = bottomBarVisibleState,
+                    currentlyPlaying = viewState.isTTSPlaying,
+                    onPlay = ttsOnPlay,
+                    onPause = ttsOnPause,
+                    onStop = ttsOnStop,
+                    onSkipNext = ttsOnSkipNext,
+                    languages = ImmutableHolder(viewState.ttsLanguages),
+                    onSelectLanguage = ttsOnSelectLanguage,
+                    floatingActionButton =
+                        when (viewState.showFab) {
+                            true -> floatingActionButton
+                            false -> null
+                        },
+                )
+            }
         },
         floatingActionButton = {
             if (viewState.showFab) {
@@ -1165,6 +1301,16 @@ fun FeedScreen(
                     Modifier
                         .align(Alignment.TopCenter),
             )
+
+            viewState.translationModelDownloadProgress?.let { progress ->
+                TranslationModelDownloadProgress(
+                    progress = progress,
+                    modifier =
+                        Modifier
+                            .align(Alignment.TopCenter)
+                            .fillMaxWidth(),
+                )
+            }
         }
 
         if (viewState.showDeleteDialog) {
@@ -1195,6 +1341,15 @@ fun FeedScreen(
                 onEdit = onEditFeed,
             )
         }
+        if (viewState.showRenameTagDialog) {
+            RenameTagDialog(
+                currentTagName = viewState.feedScreenTitle.title ?: "",
+                onDismiss = onDismissRenameTagDialog,
+                onRename = { newName ->
+                    onRenameTag(viewState.feedScreenTitle.title ?: "", newName)
+                },
+            )
+        }
     }
 }
 
@@ -1214,6 +1369,8 @@ fun FeedListContent(
     onSetBookmark: (Long, Boolean) -> Unit,
     listState: LazyListState,
     pagedFeedItems: LazyPagingItems<FeedListItem>,
+    translatedFeedCards: TranslatedFeedCards,
+    onTranslateFeedCard: (FeedListItem) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val coroutineScope = rememberCoroutineScope()
@@ -1296,10 +1453,15 @@ fun FeedListContent(
                     key = pagedFeedItems.itemKey { it.id },
                     contentType = pagedFeedItems.itemContentType { it.contentType(viewState.feedItemStyle) },
                 ) { itemIndex ->
-                    val previewItem = pagedFeedItems[itemIndex] ?: PLACEHOLDER_ITEM
+                    val loadedItem = pagedFeedItems[itemIndex] ?: PLACEHOLDER_ITEM
+                    val previewItem = translatedFeedCards.merge(loadedItem)
 
                     val itemCoroutineScope = rememberCoroutineScope()
                     var itemWasVisible by remember(previewItem.id) { mutableStateOf(false) }
+
+                    LaunchedEffect(loadedItem.id, loadedItem.title, loadedItem.snippet, translatedFeedCards.generation, onTranslateFeedCard) {
+                        onTranslateFeedCard(loadedItem)
+                    }
 
                     // Gets executed when only unread items are being shown
                     // Marks items which have been visible as read when they scroll off screen
@@ -1350,7 +1512,10 @@ fun FeedListContent(
                                 Intent.createChooser(
                                     Intent(Intent.ACTION_SEND).apply {
                                         if (previewItem.link != null) {
-                                            putExtra(Intent.EXTRA_TEXT, previewItem.link)
+                                            putExtra(
+                                                Intent.EXTRA_TEXT,
+                                                stripTrackingParameters(previewItem.link),
+                                            )
                                         }
                                         putExtra(Intent.EXTRA_TITLE, previewItem.title)
                                         type = "text/plain"
@@ -1469,6 +1634,8 @@ fun FeedGridContent(
     onSetBookmark: (Long, Boolean) -> Unit,
     gridState: LazyStaggeredGridState,
     pagedFeedItems: LazyPagingItems<FeedListItem>,
+    translatedFeedCards: TranslatedFeedCards,
+    onTranslateFeedCard: (FeedListItem) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val coroutineScope = rememberCoroutineScope()
@@ -1510,7 +1677,7 @@ fun FeedGridContent(
         ) {
             LazyVerticalStaggeredGrid(
                 state = gridState,
-                columns = StaggeredGridCells.Fixed(LocalDimens.current.feedScreenColumns),
+                columns = StaggeredGridCells.Fixed(if (viewState.forceSingleColumn) 1 else LocalDimens.current.feedScreenColumns),
                 contentPadding =
                     if (viewState.isBottomBarVisible) {
                         PaddingValues(0.dp)
@@ -1530,10 +1697,15 @@ fun FeedGridContent(
                     key = pagedFeedItems.itemKey { it.id },
                     contentType = pagedFeedItems.itemContentType { it.contentType(viewState.feedItemStyle) },
                 ) { itemIndex ->
-                    val previewItem = pagedFeedItems[itemIndex] ?: PLACEHOLDER_ITEM
+                    val loadedItem = pagedFeedItems[itemIndex] ?: PLACEHOLDER_ITEM
+                    val previewItem = translatedFeedCards.merge(loadedItem)
 
                     val itemCoroutineScope = rememberCoroutineScope()
                     var itemWasVisible by remember(previewItem.id) { mutableStateOf(false) }
+
+                    LaunchedEffect(loadedItem.id, loadedItem.title, loadedItem.snippet, translatedFeedCards.generation, onTranslateFeedCard) {
+                        onTranslateFeedCard(loadedItem)
+                    }
 
                     // Gets executed when only unread items are being shown
                     // Marks items which have been visible as read when they scroll off screen
@@ -1584,7 +1756,10 @@ fun FeedGridContent(
                                 Intent.createChooser(
                                     Intent(Intent.ACTION_SEND).apply {
                                         if (previewItem.link != null) {
-                                            putExtra(Intent.EXTRA_TEXT, previewItem.link)
+                                            putExtra(
+                                                Intent.EXTRA_TEXT,
+                                                stripTrackingParameters(previewItem.link),
+                                            )
                                         }
                                         putExtra(Intent.EXTRA_TITLE, previewItem.title)
                                         type = "text/plain"
@@ -1651,6 +1826,23 @@ fun FeedGridContent(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun TranslationModelDownloadProgress(
+    progress: BergamotModelDownloadProgress,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        tonalElevation = 3.dp,
+    ) {
+        TranslationProgressContent(
+            progress = progress,
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }
 

@@ -11,6 +11,7 @@ import com.nononsenseapps.feeder.archmodel.SortingOptions
 import com.nononsenseapps.feeder.archmodel.SwipeAsRead
 import com.nononsenseapps.feeder.archmodel.SyncFrequency
 import com.nononsenseapps.feeder.archmodel.ThemeOptions
+import com.nononsenseapps.feeder.archmodel.TranslationApiSettings
 import com.nononsenseapps.feeder.archmodel.UserSettings
 import com.nononsenseapps.feeder.db.room.FeedDao
 import com.nononsenseapps.feeder.model.OPMLParserHandler
@@ -77,6 +78,7 @@ class OpmlParserTest : DIAware {
                         UserSettings.SETTINGS_FILTER_READ -> "false"
                         UserSettings.SETTINGS_LIST_SHOW_ONLY_TITLES -> "true"
                         UserSettings.SETTING_OPEN_ADJACENT -> "true"
+                        UserSettings.SETTING_USE_IN_APP_AUDIO_PLAYER -> "false"
                         UserSettings.SETTING_FONT -> "bundled/roboto_flex"
                         UserSettings.SETTING_LIST_SHOW_READING_TIME -> "false"
                         UserSettings.SETTING_OPEN_DRAWER_ON_FAB -> "true"
@@ -91,6 +93,17 @@ class OpmlParserTest : DIAware {
                         UserSettings.SETTING_OPENAI_AZURE_DEPLOYMENT_ID -> "test-deployment"
                         UserSettings.SETTING_OPENAI_REQUEST_TIMEOUT_SECONDS -> "45"
                         UserSettings.SETTING_BLOCKLIST_APPLY_TO_SUMMARIES -> "true"
+                        UserSettings.SETTING_BLOCKLIST_APPLY_TO_LINKS -> "true"
+                        UserSettings.SETTING_PREFERRED_TRANSLATION_LANGUAGE -> "French"
+                        UserSettings.SETTING_TRANSLATION_API_KEY -> "translation-api-key"
+                        UserSettings.SETTING_TRANSLATION_API_MODEL_ID -> ""
+                        UserSettings.SETTING_TRANSLATION_API_URL -> "https://api.deepl.com"
+                        UserSettings.SETTING_TRANSLATION_API_AZURE_VERSION -> "2024-06-01"
+                        UserSettings.SETTING_TRANSLATION_API_AZURE_DEPLOYMENT_ID -> "translation-deployment"
+                        UserSettings.SETTING_TRANSLATION_API_REQUEST_TIMEOUT_SECONDS -> "90"
+                        UserSettings.SETTING_TRANSLATE_ARTICLE_PREVIEWS_BY_DEFAULT -> "true"
+                        UserSettings.SETTING_TRANSLATE_ARTICLES_BY_DEFAULT -> "true"
+                        UserSettings.SETTINGS_FORCE_SINGLE_COLUMN -> "true"
                     },
             )
         }
@@ -100,7 +113,9 @@ class OpmlParserTest : DIAware {
     fun handlesAllSettings(): Unit =
         runBlocking {
             every { settingsStore.openAiSettings } returns MutableStateFlow(OpenAISettings())
+            every { settingsStore.translationApiSettings } returns MutableStateFlow(TranslationApiSettings())
             every { settingsStore.setOpenAiSettings(any()) } just Runs
+            every { settingsStore.setTranslationApiSettings(any()) } just Runs
             setAllSettings()
             verify {
                 settingsStore.setLinkOpener(LinkOpener.CUSTOM_TAB)
@@ -128,6 +143,7 @@ class OpmlParserTest : DIAware {
                 settingsStore.setFeedListFilterSaved(true)
                 settingsStore.setShowOnlyTitles(true)
                 settingsStore.setOpenAdjacent(true)
+                settingsStore.setUseInAppAudioPlayer(false)
                 settingsStore.setFont(FontSelection.RobotoFlex)
                 settingsStore.setShowReadingTime(false)
                 settingsStore.setOpenDrawerOnFab(true)
@@ -137,17 +153,14 @@ class OpmlParserTest : DIAware {
                 settingsStore.setMaxCountPerFeed(200)
                 settingsStore.openAiSettings
                 settingsStore.setOpenAiSettings(any())
-//                settingsStore.setOpenAiSettings(
-//                    OpenAISettings(
-//                        modelId = "gpt-4o-mini",
-//                        baseUrl = "https://api.openai.com",
-//                        timeoutSeconds = 45,
-//                        azureApiVersion = "2023-05-15",
-//                        azureDeploymentId = "test-deployment",
-//                        key = "test-api-key",
-//                    )
-//                )
+                settingsStore.setPreferredTranslationLanguage("French")
+                settingsStore.translationApiSettings
+                settingsStore.setTranslationApiSettings(any())
+                settingsStore.setTranslateArticlePreviewsByDefault(true)
+                settingsStore.setTranslateArticlesByDefault(true)
                 settingsStore.setApplyBlocklistToSummaries(true)
+                settingsStore.setApplyBlocklistToLinks(true)
+                settingsStore.setForceSingleColumn(true)
             }
 
             confirmVerified(settingsStore)

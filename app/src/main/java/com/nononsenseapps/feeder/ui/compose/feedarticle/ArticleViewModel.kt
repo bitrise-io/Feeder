@@ -4,14 +4,17 @@ import android.util.Log
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.text.AnnotatedString
 import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.application
 import androidx.lifecycle.viewModelScope
 import com.nononsenseapps.feeder.ApplicationCoroutineScope
+import com.nononsenseapps.feeder.R
 import com.nononsenseapps.feeder.archmodel.Article
 import com.nononsenseapps.feeder.archmodel.Enclosure
 import com.nononsenseapps.feeder.archmodel.LinkOpener
 import com.nononsenseapps.feeder.archmodel.OpenAISettings
 import com.nononsenseapps.feeder.archmodel.Repository
 import com.nononsenseapps.feeder.archmodel.TextToDisplay
+import com.nononsenseapps.feeder.archmodel.TranslationApiSettings
 import com.nononsenseapps.feeder.background.runOnceRssSync
 import com.nononsenseapps.feeder.base.DIAwareViewModel
 import com.nononsenseapps.feeder.blob.blobFile
@@ -20,30 +23,42 @@ import com.nononsenseapps.feeder.blob.blobFullInputStream
 import com.nononsenseapps.feeder.blob.blobInputStream
 import com.nononsenseapps.feeder.db.room.FeedItemForFetching
 import com.nononsenseapps.feeder.db.room.ID_UNSET
+import com.nononsenseapps.feeder.localtranslation.BergamotModelDownloadProgress
+import com.nononsenseapps.feeder.localtranslation.BergamotModelManager
+import com.nononsenseapps.feeder.localtranslation.LocalTranslator
+import com.nononsenseapps.feeder.model.ArticleTranslation
 import com.nononsenseapps.feeder.model.FeedParserError
 import com.nononsenseapps.feeder.model.FullTextParser
+import com.nononsenseapps.feeder.model.FullTextTooLarge
 import com.nononsenseapps.feeder.model.LocaleOverride
 import com.nononsenseapps.feeder.model.NoBody
 import com.nononsenseapps.feeder.model.NoUrl
 import com.nononsenseapps.feeder.model.NotHTML
 import com.nononsenseapps.feeder.model.PlaybackStatus
+import com.nononsenseapps.feeder.model.PodcastPlayerState
+import com.nononsenseapps.feeder.model.PodcastPlayerStateHolder
+import com.nononsenseapps.feeder.model.SystemTranslationSettingsRequiredException
 import com.nononsenseapps.feeder.model.TTSStateHolder
 import com.nononsenseapps.feeder.model.ThumbnailImage
+import com.nononsenseapps.feeder.model.TranslationManager
 import com.nononsenseapps.feeder.model.UnsupportedContentType
 import com.nononsenseapps.feeder.model.html.HtmlLinearizer
 import com.nononsenseapps.feeder.model.html.LinearArticle
 import com.nononsenseapps.feeder.openai.OpenAIApi
-import com.nononsenseapps.feeder.openai.isValid
-import com.nononsenseapps.feeder.ui.compose.text.htmlStringToAnnotatedString
+import com.nononsenseapps.feeder.openai.canSummarize
+import com.nononsenseapps.feeder.openai.canUseAsTranslationApi
+import com.nononsenseapps.feeder.openai.isLocalTranslation
 import com.nononsenseapps.feeder.ui.compose.text.htmlToAnnotatedString
 import com.nononsenseapps.feeder.ui.text.MarkdownToHtmlConverter
 import com.nononsenseapps.feeder.util.Either
 import com.nononsenseapps.feeder.util.FilePathProvider
+import com.nononsenseapps.feeder.util.ToastMaker
 import com.nononsenseapps.feeder.util.logDebug
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.map
@@ -64,9 +79,14 @@ class ArticleViewModel(
 ) : DIAwareViewModel(di) {
     private val repository: Repository by instance()
     private val ttsStateHolder: TTSStateHolder by instance()
+    private val podcastPlayerStateHolder: PodcastPlayerStateHolder by instance()
     private val fullTextParser: FullTextParser by instance()
     private val filePathProvider: FilePathProvider by instance()
     private val openAIApi: OpenAIApi by instance()
+    private val toastMaker: ToastMaker by instance()
+    private val translationManager: TranslationManager by instance()
+    private val bergamotModelManager: BergamotModelManager by instance()
+    private val localTranslator: LocalTranslator by instance()
 
     // Use this for actions which should complete even if app goes off screen
     private val applicationCoroutineScope: ApplicationCoroutineScope by instance()
@@ -74,6 +94,9 @@ class ArticleViewModel(
     val itemId: Long =
         state["itemId"]
             ?: throw IllegalArgumentException("Missing itemId in savedState")
+
+    val scrollPosition: Int get() =
+        state["scrollPosition"] ?: 0
 
     private val articleFlow =
         repository
@@ -104,51 +127,80 @@ class ArticleViewModel(
                 initialValue = LinearArticle(emptyList()),
             )
 
-    fun toggleFullText() {
-        // Using as general loading text
-        textToDisplay.update { TextToDisplay.LOADING_FULLTEXT }
-        displayFullTextOverride.value = displayFullTextOverride.value?.not() ?: articleFlow.value?.fullTextByDefault?.not() ?: true
+    private val toolbarVisible = MutableStateFlow(state["toolbarMenuVisible"] ?: false)
+    private val openAiSummary = MutableStateFlow<OpenAISummaryState>(OpenAISummaryState.Empty)
+    private val showTranslatedContent = MutableStateFlow(false)
+    private val translatedArticleContent = MutableStateFlow(LinearArticle(emptyList()))
+    private val articleTranslationState = MutableStateFlow<ArticleTranslationState>(ArticleTranslationState.Empty)
+    private var handledInitialOpenActions = false
+
+    fun saveScrollPosition(pos: Int) {
+        state["scrollPosition"] = pos
     }
 
     private val isFullText: Boolean
         get() = displayFullTextOverride.value ?: articleFlow.value?.fullTextByDefault ?: false
-
-    private val toolbarVisible: MutableStateFlow<Boolean> =
-        MutableStateFlow(state["toolbarMenuVisible"] ?: false)
-
-    private val openAiSummary: MutableStateFlow<OpenAISummaryState> = MutableStateFlow(OpenAISummaryState.Empty)
 
     val viewState: StateFlow<ArticleScreenViewState> =
         combine(
             articleFlow,
             textToDisplay,
             articleContentFlow,
+            translatedArticleContent,
             toolbarVisible,
             repository.linkOpener,
             repository.useDetectLanguage,
             ttsStateHolder.ttsState,
             ttsStateHolder.availableLanguages,
             repository.openAISettings,
+            repository.translationApiSettings,
+            repository.preferredTranslationLanguage,
             openAiSummary,
+            showTranslatedContent,
+            articleTranslationState,
+            bergamotModelManager.downloadProgress,
+            podcastPlayerStateHolder.playerState,
+            repository.useInAppAudioPlayer,
         ) { params ->
             val article = params[0] as Article?
             val textToDisplay = params[1] as TextToDisplay
             val articleContent = params[2] as LinearArticle
-            val toolbarVisible = params[3] as Boolean
-            val linkOpener = params[4] as LinkOpener
-            val useDetectLanguage = params[5] as Boolean
-            val ttsState = params[6] as PlaybackStatus
+            val translatedArticleContent = params[3] as LinearArticle
+            val toolbarVisible = params[4] as Boolean
+            val linkOpener = params[5] as LinkOpener
+            val useDetectLanguage = params[6] as Boolean
+            val ttsState = params[7] as PlaybackStatus
 
             @Suppress("UNCHECKED_CAST")
-            val ttsLanguages = params[7] as List<Locale>
+            val ttsLanguages = params[8] as List<Locale>
 
-            val showSummarize = (params[8] as OpenAISettings).isValid && !article?.link.isNullOrEmpty()
-            val openAiSummary = (params[9] as OpenAISummaryState)
+            val summarySettings = params[9] as OpenAISettings
+            val translationSettings = params[10] as TranslationApiSettings
+            val preferredTranslationLanguage = (params[11] as String).trim()
+            val openAiSummary = params[12] as OpenAISummaryState
+            val showTranslated = params[13] as Boolean
+            val translationState = params[14] as ArticleTranslationState
+            val translationDownloadProgress = params[15] as BergamotModelDownloadProgress?
+            val podcastPlayerState = params[16] as PodcastPlayerState
+            val useInAppAudioPlayer = params[17] as Boolean
+            val currentTranslation =
+                (translationState as? ArticleTranslationState.Result)
+                    ?.takeIf { it.isFullText == isFullText }
+            val alreadyInPreferredLanguage =
+                (translationState as? ArticleTranslationState.AlreadyInPreferredLanguage)
+                    ?.takeIf { it.isFullText == isFullText }
+            val isShowingTranslated = showTranslated && currentTranslation != null
+            val canRequestTranslation =
+                translationSettings.canUseAsTranslationApi &&
+                    preferredTranslationLanguage.isNotBlank() &&
+                    !article?.link.isNullOrEmpty()
 
             ArticleState(
                 useDetectLanguage = useDetectLanguage,
-                isBottomBarVisible = ttsState != PlaybackStatus.STOPPED,
+                isBottomBarVisible = ttsState != PlaybackStatus.STOPPED || podcastPlayerState.isVisible,
                 isTTSPlaying = ttsState == PlaybackStatus.PLAYING,
+                podcastPlayerState = podcastPlayerState,
+                useInAppAudioPlayer = useInAppAudioPlayer,
                 ttsLanguages = ttsLanguages,
                 articleFeedUrl = article?.feedUrl,
                 articleId = itemId,
@@ -159,7 +211,7 @@ class ArticleViewModel(
                 pubDate = article?.pubDate,
                 author = article?.author,
                 enclosure = article?.enclosure ?: Enclosure(),
-                articleTitle = article?.title ?: "",
+                articleTitle = if (isShowingTranslated) currentTranslation.translatedTitle else article?.title ?: "",
                 showToolbarMenu = toolbarVisible,
                 feedDisplayTitle = article?.feedDisplayTitle ?: "",
                 isBookmarked = article?.bookmarked == true,
@@ -170,9 +222,18 @@ class ArticleViewModel(
                         article?.wordCount ?: 0
                     },
                 image = article?.image,
-                showSummarize = showSummarize,
+                showSummarize = summarySettings.canSummarize && !article?.link.isNullOrEmpty(),
                 openAiSummary = openAiSummary,
-                articleContent = articleContent,
+                showTranslate = isShowingTranslated || (canRequestTranslation && alreadyInPreferredLanguage == null),
+                isShowingTranslated = isShowingTranslated,
+                isTranslationLoading = translationState is ArticleTranslationState.Loading,
+                translationModelDownloadProgress = translationDownloadProgress,
+                translationSourceLanguage = currentTranslation?.sourceLanguage ?: alreadyInPreferredLanguage?.sourceLanguage.orEmpty(),
+                systemTranslationSettingsMessage =
+                    (translationState as? ArticleTranslationState.SystemSettingsRequired)
+                        ?.message
+                        .orEmpty(),
+                articleContent = if (isShowingTranslated) translatedArticleContent else articleContent,
             )
         }.stateIn(
             scope = viewModelScope,
@@ -183,15 +244,84 @@ class ArticleViewModel(
     init {
         viewModelScope.launch {
             articleFlow.collect { article ->
-                val feedId = article?.item?.feedId
-                if (feedId != null) {
-                    val feed = repository.getFeed(feedId)
-                    if (feed?.summarizeOnOpen == true) {
-                        summarize()
-                        return@collect // Only summarize on first load
-                    }
+                val feedId = article?.item?.feedId ?: return@collect
+                if (handledInitialOpenActions) {
+                    return@collect
+                }
+                handledInitialOpenActions = true
+
+                val feed = repository.getFeed(feedId)
+                if (feed?.summarizeOnOpen == true && repository.openAISettings.value.canSummarize) {
+                    summarize()
+                }
+
+                if (
+                    repository.translateArticlesByDefault.value &&
+                    canTranslateArticles() &&
+                    canStartAutomaticArticleTranslation(article)
+                ) {
+                    showTranslatedContent.value = true
+                    translateCurrentArticle()
                 }
             }
+        }
+
+        viewModelScope.launch {
+            combine(
+                articleFlow,
+                displayFullTextOverride,
+                repository.translationApiSettings,
+                repository.preferredTranslationLanguage,
+            ) { article, fullTextOverride, settings, targetLanguage ->
+                val currentArticle = article ?: return@combine null
+                val fullText = fullTextOverride ?: currentArticle.fullTextByDefault
+                if (!settings.canUseAsTranslationApi || targetLanguage.trim().isBlank() || currentArticle.link.isNullOrBlank()) {
+                    return@combine null
+                }
+                ArticleLanguageCheck(
+                    article = currentArticle,
+                    isFullText = fullText,
+                )
+            }.collectLatest { request ->
+                if (request == null) {
+                    clearAlreadyInPreferredLanguageState()
+                    return@collectLatest
+                }
+
+                val html =
+                    loadArticleHtmlForLanguageDetection(
+                        article = request.article,
+                        fullText = request.isFullText,
+                    ) ?: run {
+                        clearAlreadyInPreferredLanguageState(request.isFullText)
+                        return@collectLatest
+                    }
+
+                val sourceLanguage =
+                    detectArticleAlreadyInPreferredLanguage(
+                        article = request.article,
+                        fullText = request.isFullText,
+                        html = html,
+                    )
+
+                if (sourceLanguage != null) {
+                    setAlreadyInPreferredLanguage(
+                        sourceLanguage = sourceLanguage,
+                        isFullText = request.isFullText,
+                    )
+                } else {
+                    clearAlreadyInPreferredLanguageState(request.isFullText)
+                }
+            }
+        }
+    }
+
+    fun toggleFullText() {
+        // Using as general loading text
+        textToDisplay.update { TextToDisplay.LOADING_FULLTEXT }
+        displayFullTextOverride.value = displayFullTextOverride.value?.not() ?: articleFlow.value?.fullTextByDefault?.not() ?: true
+        if (showTranslatedContent.value) {
+            translateCurrentArticle()
         }
     }
 
@@ -202,7 +332,12 @@ class ArticleViewModel(
         logDebug(LOG_TAG, "parseArticleContent(${article.id}, $fullText)")
         return try {
             withContext(Dispatchers.IO) {
-                val htmlLinearizer = HtmlLinearizer()
+                val htmlLinearizer =
+                    HtmlLinearizer(
+                        tooLargeText = application.getString(R.string.failed_to_fetch_full_article_too_large),
+                        openInBrowserText = application.getString(R.string.open_in_web_view),
+                        articleLink = article.link ?: "",
+                    )
                 when (fullText) {
                     false -> {
                         if (blobFile(article.id, filePathProvider.articleDir).isFile) {
@@ -255,6 +390,7 @@ class ArticleViewModel(
                                 is NoUrl -> TextToDisplay.FAILED_MISSING_LINK
                                 is UnsupportedContentType -> TextToDisplay.FAILED_NOT_HTML
                                 is NotHTML -> TextToDisplay.FAILED_NOT_HTML
+                                is FullTextTooLarge -> TextToDisplay.FAILED_FULLTEXT_TOO_LARGE
                                 else -> TextToDisplay.FAILED_TO_LOAD_FULLTEXT
                             }?.let { errorText ->
                                 textToDisplay.update { errorText }
@@ -325,49 +461,65 @@ class ArticleViewModel(
     }
 
     fun ttsPlay() {
+        stopPodcastPlayback()
+        if (ttsStateHolder.resumeIfPausedOn(itemId)) {
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
-            val article =
-                repository.getCurrentArticle()
-                    ?: return@launch
-            val readFullText = displayFullTextOverride.value ?: article.fullTextByDefault
+            val feedItem = repository.getCurrentArticle() ?: return@launch
+            val article = Article(feedItem)
+            val readFullText = displayFullTextOverride.value ?: feedItem.fullTextByDefault
             val textToRead =
-                when (readFullText) {
-                    false ->
-                        Either.catching<TSSError, List<AnnotatedString>>(
-                            onCatch = {
-                                when (it) {
-                                    is FileNotFoundException -> TTSFileNotFound
-                                    else -> TTSUnknownError
-                                }
-                            },
-                        ) {
-                            blobInputStream(article.id, filePathProvider.articleDir).use {
-                                htmlToAnnotatedString(
-                                    inputStream = it,
-                                    baseUrl = article.feedUrl.toString(),
-                                )
+                if (showTranslatedContent.value) {
+                    Either.catching<TSSError, List<AnnotatedString>>(
+                        onCatch = {
+                            when (it) {
+                                is FileNotFoundException -> TTSFileNotFound
+                                else -> TTSUnknownError
                             }
-                        }
+                        },
+                    ) {
+                        htmlToAnnotatedString(
+                            inputStream = loadTranslatedArticle(article, readFullText).translatedHtml.byteInputStream(),
+                            baseUrl = feedItem.feedUrl.toString(),
+                        )
+                    }
+                } else {
+                    when (readFullText) {
+                        false ->
+                            Either.catching<TSSError, List<AnnotatedString>>(
+                                onCatch = {
+                                    when (it) {
+                                        is FileNotFoundException -> TTSFileNotFound
+                                        else -> TTSUnknownError
+                                    }
+                                },
+                            ) {
+                                blobInputStream(article.id, filePathProvider.articleDir).use {
+                                    htmlToAnnotatedString(
+                                        inputStream = it,
+                                        baseUrl = feedItem.feedUrl.toString(),
+                                    )
+                                }
+                            }
 
-                    true ->
-                        Either.catching<TSSError, List<AnnotatedString>>(
-                            onCatch = {
-                                when (it) {
-                                    is FileNotFoundException -> TTSFileNotFound
-                                    else -> TTSUnknownError
+                        true ->
+                            Either.catching<TSSError, List<AnnotatedString>>(
+                                onCatch = {
+                                    when (it) {
+                                        is FileNotFoundException -> TTSFileNotFound
+                                        else -> TTSUnknownError
+                                    }
+                                },
+                            ) {
+                                blobFullInputStream(article.id, filePathProvider.fullArticleDir).use {
+                                    htmlToAnnotatedString(
+                                        inputStream = it,
+                                        baseUrl = feedItem.feedUrl.toString(),
+                                    )
                                 }
-                            },
-                        ) {
-                            blobFullInputStream(
-                                article.id,
-                                filePathProvider.fullArticleDir,
-                            ).use {
-                                htmlToAnnotatedString(
-                                    inputStream = it,
-                                    baseUrl = article.feedUrl.toString(),
-                                )
                             }
-                        }
+                    }
                 }
 
             // TODO show error some message
@@ -375,6 +527,7 @@ class ArticleViewModel(
                 ttsStateHolder.tts(
                     textArray = it,
                     useDetectLanguage = repository.useDetectLanguage.value,
+                    articleId = itemId,
                 )
             }
         }
@@ -386,6 +539,35 @@ class ArticleViewModel(
 
     fun ttsStop() {
         ttsStateHolder.stop()
+    }
+
+    fun openPodcastPlayer(link: String) {
+        if (link.isBlank()) {
+            return
+        }
+
+        ttsStop()
+        podcastPlayerStateHolder.playLink(link)
+    }
+
+    fun podcastPlay() {
+        podcastPlayerStateHolder.play()
+    }
+
+    fun podcastPause() {
+        podcastPlayerStateHolder.pause()
+    }
+
+    fun stopPodcastPlayback() {
+        podcastPlayerStateHolder.stop()
+    }
+
+    fun podcastSeekBy(deltaMillis: Int) {
+        podcastPlayerStateHolder.seekBy(deltaMillis)
+    }
+
+    fun podcastSeekTo(positionMillis: Int) {
+        podcastPlayerStateHolder.seekTo(positionMillis)
     }
 
     fun ttsSkipNext() {
@@ -401,7 +583,7 @@ class ArticleViewModel(
             try {
                 openAiSummary.value = OpenAISummaryState.Loading
                 val content = loadArticleContent()
-                val summaryResult = openAIApi.summarize(content)
+                val summaryResult = openAIApi.summarize(content, repository.openAISettings.value)
                 val annotatedStrings = convertSummaryToAnnotatedStrings(summaryResult)
                 openAiSummary.value =
                     OpenAISummaryState.Result(
@@ -420,13 +602,139 @@ class ArticleViewModel(
         }
     }
 
+    fun translate() {
+        if (showTranslatedContent.value) {
+            showTranslatedContent.value = false
+            return
+        }
+        showTranslatedContent.value = true
+        translateCurrentArticle()
+    }
+
+    private fun translateCurrentArticle() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val targetLanguage = repository.preferredTranslationLanguage.value.trim()
+                if (targetLanguage.isBlank()) {
+                    toastMaker.makeToast(R.string.set_translation_language_first)
+                    clearTranslatedContent()
+                    return@launch
+                }
+
+                val article = articleFlow.value ?: return@launch
+                val fullText = isFullText
+                if (!repository.translationApiSettings.value.canUseAsTranslationApi) {
+                    clearTranslatedContent()
+                    return@launch
+                }
+
+                val html = loadArticleHtml(article, fullText)
+                val sourceLanguage =
+                    detectArticleAlreadyInPreferredLanguage(
+                        article = article,
+                        fullText = fullText,
+                        html = html,
+                    )
+                if (sourceLanguage != null) {
+                    setAlreadyInPreferredLanguage(
+                        sourceLanguage = sourceLanguage,
+                        isFullText = fullText,
+                    )
+                    return@launch
+                }
+
+                articleTranslationState.value = ArticleTranslationState.Loading
+                val translation =
+                    translationManager.getOrTranslateArticle(
+                        itemId = article.id,
+                        title = article.title,
+                        html = html,
+                        isFullText = fullText,
+                    ) ?: throw IllegalStateException("Translation failed")
+
+                translatedArticleContent.value =
+                    HtmlLinearizer(
+                        tooLargeText = application.getString(R.string.failed_to_fetch_full_article_too_large),
+                        openInBrowserText = application.getString(R.string.open_in_web_view),
+                        articleLink = article.link ?: "",
+                    ).linearize(
+                        translation.translatedHtml,
+                        article.feedUrl ?: "",
+                    )
+                articleTranslationState.value =
+                    ArticleTranslationState.Result(
+                        translatedTitle = translation.translatedTitle,
+                        sourceLanguage = translation.sourceLanguage,
+                        isFullText = fullText,
+                    )
+            } catch (e: SystemTranslationSettingsRequiredException) {
+                showTranslatedContent.value = false
+                translatedArticleContent.value = LinearArticle(emptyList())
+                articleTranslationState.value =
+                    ArticleTranslationState.SystemSettingsRequired(
+                        e.message ?: "Translation model required",
+                    )
+            } catch (e: Exception) {
+                clearTranslatedContent()
+                toastMaker.makeToast(e.message ?: "Translation failed")
+            }
+        }
+    }
+
+    private suspend fun canStartAutomaticArticleTranslation(article: Article): Boolean {
+        val settings = repository.translationApiSettings.value
+        if (!settings.isLocalTranslation) {
+            return true
+        }
+
+        val targetLanguage = repository.preferredTranslationLanguage.value.trim()
+        if (targetLanguage.isBlank()) {
+            return false
+        }
+
+        val fullText = article.fullTextByDefault
+        val html = loadArticleHtml(article, fullText)
+
+        val hasCachedTranslation =
+            translationManager.hasCachedTranslatedArticle(
+                itemId = article.id,
+                title = article.title,
+                html = html,
+                isFullText = fullText,
+                settings = settings,
+                targetLanguage = targetLanguage,
+            )
+        if (hasCachedTranslation) {
+            return true
+        }
+
+        return runCatching {
+            localTranslator.canTranslateWithoutBergamotDownload(
+                content = html,
+                targetLanguage = targetLanguage,
+                preserveHtml = true,
+            )
+        }.getOrDefault(false)
+    }
+
+    private suspend fun loadTranslatedArticle(
+        article: Article,
+        fullText: Boolean,
+    ): ArticleTranslation =
+        translationManager.getOrTranslateArticle(
+            itemId = article.id,
+            title = article.title,
+            html = loadArticleHtml(article, fullText),
+            isFullText = fullText,
+        ) ?: throw IllegalStateException("Translation failed")
+
     private suspend fun convertSummaryToAnnotatedStrings(summaryResult: OpenAIApi.SummaryResult): List<AnnotatedString> =
         withContext(Dispatchers.Default) {
             return@withContext when (summaryResult) {
                 is OpenAIApi.SummaryResult.Success -> {
                     val markdownConverter = MarkdownToHtmlConverter()
                     val htmlContent = markdownConverter.convertToHtml(summaryResult.content)
-                    htmlStringToAnnotatedString(htmlContent)
+                    htmlToAnnotatedString(htmlContent.byteInputStream(), "")
                 }
                 is OpenAIApi.SummaryResult.Error -> {
                     // For error messages, create a simple AnnotatedString directly
@@ -459,10 +767,110 @@ class ArticleViewModel(
                     }
             }
 
-        val content =
-            Jsoup.parse(contentStream, null, viewState.articleFeedUrl ?: "")?.body()?.text()
-                ?: throw IllegalStateException("Cannot parse content")
-        return content
+        return Jsoup.parse(contentStream, null, viewState.articleFeedUrl ?: "").body().text()
+    }
+
+    private suspend fun detectArticleAlreadyInPreferredLanguage(
+        article: Article,
+        fullText: Boolean,
+        html: String,
+    ): String? =
+        translationManager.detectArticleAlreadyInTargetLanguage(
+            itemId = article.id,
+            title = article.title,
+            html = html,
+            isFullText = fullText,
+        )
+
+    private suspend fun loadArticleHtml(
+        article: Article,
+        fullText: Boolean,
+    ): String =
+        withContext(Dispatchers.IO) {
+            when (fullText) {
+                false -> readArticleBlobIfPresent(article.id) ?: article.snippet
+
+                true -> {
+                    val cachedHtml = readFullArticleBlobIfPresent(article.id)
+                    if (cachedHtml != null) {
+                        return@withContext cachedHtml
+                    }
+
+                    val error = retrieveFullText(article.id).leftOrNull()
+                    if (error != null) {
+                        throw IllegalStateException("Cannot load article: ${error.description}", error.throwable)
+                    }
+                    readFullArticleBlobIfPresent(article.id)
+                        ?: throw IllegalStateException("Cannot load article")
+                }
+            }
+        }
+
+    private suspend fun loadArticleHtmlForLanguageDetection(
+        article: Article,
+        fullText: Boolean,
+    ): String? =
+        withContext(Dispatchers.IO) {
+            when (fullText) {
+                false -> readArticleBlobIfPresent(article.id) ?: article.snippet.takeIf(String::isNotBlank)
+                true -> readFullArticleBlobIfPresent(article.id)
+            }
+        }
+
+    private fun readArticleBlobIfPresent(itemId: Long): String? =
+        blobFile(itemId, filePathProvider.articleDir)
+            .takeIf { it.isFile }
+            ?.let {
+                blobInputStream(itemId, filePathProvider.articleDir).bufferedReader().use { reader ->
+                    reader.readText()
+                }
+            }
+
+    private fun readFullArticleBlobIfPresent(itemId: Long): String? =
+        blobFullFile(itemId, filePathProvider.fullArticleDir)
+            .takeIf { it.isFile }
+            ?.let {
+                blobFullInputStream(itemId, filePathProvider.fullArticleDir).bufferedReader().use { reader ->
+                    reader.readText()
+                }
+            }
+
+    private fun canTranslateArticles(): Boolean =
+        repository.translationApiSettings.value.canUseAsTranslationApi &&
+            repository.preferredTranslationLanguage.value
+                .trim()
+                .isNotBlank()
+
+    private fun setAlreadyInPreferredLanguage(
+        sourceLanguage: String,
+        isFullText: Boolean,
+    ) {
+        showTranslatedContent.value = false
+        translatedArticleContent.value = LinearArticle(emptyList())
+        articleTranslationState.value =
+            ArticleTranslationState.AlreadyInPreferredLanguage(
+                sourceLanguage = sourceLanguage,
+                isFullText = isFullText,
+            )
+    }
+
+    private fun clearAlreadyInPreferredLanguageState(isFullText: Boolean? = null) {
+        val currentState = articleTranslationState.value as? ArticleTranslationState.AlreadyInPreferredLanguage ?: return
+        if (isFullText == null || currentState.isFullText == isFullText) {
+            articleTranslationState.value = ArticleTranslationState.Empty
+        }
+    }
+
+    private fun clearTranslatedContent() {
+        showTranslatedContent.value = false
+        translatedArticleContent.value = LinearArticle(emptyList())
+        articleTranslationState.value = ArticleTranslationState.Empty
+    }
+
+    fun dismissSystemTranslationSettingsPrompt() {
+        if (articleTranslationState.value is ArticleTranslationState.SystemSettingsRequired) {
+            articleTranslationState.value = ArticleTranslationState.Empty
+        }
     }
 
     companion object {
@@ -474,6 +882,8 @@ private data class ArticleState(
     override val useDetectLanguage: Boolean = false,
     override val isBottomBarVisible: Boolean = false,
     override val isTTSPlaying: Boolean = false,
+    override val podcastPlayerState: PodcastPlayerState = PodcastPlayerState(),
+    override val useInAppAudioPlayer: Boolean = true,
     override val ttsLanguages: List<Locale> = emptyList(),
     override val articleFeedUrl: String? = null,
     override val articleId: Long = ID_UNSET,
@@ -493,6 +903,12 @@ private data class ArticleState(
     override val image: ThumbnailImage? = null,
     override val showSummarize: Boolean = false,
     override val openAiSummary: OpenAISummaryState = OpenAISummaryState.Empty,
+    override val showTranslate: Boolean = false,
+    override val isShowingTranslated: Boolean = false,
+    override val isTranslationLoading: Boolean = false,
+    override val translationModelDownloadProgress: BergamotModelDownloadProgress? = null,
+    override val translationSourceLanguage: String = "",
+    override val systemTranslationSettingsMessage: String = "",
     override val articleContent: LinearArticle = LinearArticle(emptyList()),
 ) : ArticleScreenViewState
 
@@ -501,6 +917,8 @@ interface ArticleScreenViewState {
     val useDetectLanguage: Boolean
     val isBottomBarVisible: Boolean
     val isTTSPlaying: Boolean
+    val podcastPlayerState: PodcastPlayerState
+    val useInAppAudioPlayer: Boolean
     val ttsLanguages: List<Locale>
     val articleFeedUrl: String?
     val articleId: Long
@@ -520,6 +938,12 @@ interface ArticleScreenViewState {
     val image: ThumbnailImage?
     val showSummarize: Boolean
     val openAiSummary: OpenAISummaryState
+    val showTranslate: Boolean
+    val isShowingTranslated: Boolean
+    val isTranslationLoading: Boolean
+    val translationModelDownloadProgress: BergamotModelDownloadProgress?
+    val translationSourceLanguage: String
+    val systemTranslationSettingsMessage: String
     val articleContent: LinearArticle
 }
 
@@ -533,6 +957,32 @@ sealed interface OpenAISummaryState {
         val annotatedStrings: List<AnnotatedString>,
     ) : OpenAISummaryState
 }
+
+sealed interface ArticleTranslationState {
+    data object Empty : ArticleTranslationState
+
+    data object Loading : ArticleTranslationState
+
+    data class AlreadyInPreferredLanguage(
+        val sourceLanguage: String,
+        val isFullText: Boolean,
+    ) : ArticleTranslationState
+
+    data class SystemSettingsRequired(
+        val message: String,
+    ) : ArticleTranslationState
+
+    data class Result(
+        val translatedTitle: String,
+        val sourceLanguage: String,
+        val isFullText: Boolean,
+    ) : ArticleTranslationState
+}
+
+private data class ArticleLanguageCheck(
+    val article: Article,
+    val isFullText: Boolean,
+)
 
 interface ArticleItemKeyHolder {
     fun getAndIncrementKey(): Any

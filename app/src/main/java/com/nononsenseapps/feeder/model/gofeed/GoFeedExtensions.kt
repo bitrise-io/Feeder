@@ -8,6 +8,7 @@ import com.nononsenseapps.feeder.util.findFirstImageInHtml
 import com.nononsenseapps.feeder.util.relativeLinkIntoAbsolute
 import com.nononsenseapps.feeder.util.relativeLinkIntoAbsoluteOrNull
 import okhttp3.internal.toLongOrDefault
+import java.net.URI
 import java.net.URL
 
 class FeederGoItem(
@@ -56,7 +57,18 @@ class FeederGoItem(
 
     val snippet: String by lazy { plainContent.take(200) }
 
-    val link: String? by lazy { goItem.link?.let { relativeLinkIntoAbsolute(feedBaseUrl, it) } }
+    val link: String? by lazy {
+        val rawLink =
+            goItem.link ?: goItem.guid?.takeIf { guid ->
+                try {
+                    val uri = URI(guid)
+                    uri.isAbsolute && (uri.scheme == "http" || uri.scheme == "https")
+                } catch (_: Exception) {
+                    false
+                }
+            }
+        rawLink?.let { relativeLinkIntoAbsolute(feedBaseUrl, it) }
+    }
 
     val updated: String?
         get() = goItem.updatedParsed
@@ -86,7 +98,7 @@ class FeederGoItem(
     val extensions: GoExtensions?
         get() = goItem.extensions
 
-    val thumbnail: ThumbnailImage? by lazy {
+    val feedThumbnail: ThumbnailImage? by lazy {
         val thumbnailCandidates =
             sequence {
                 goItem.image?.let { goImage ->
@@ -122,7 +134,17 @@ class FeederGoItem(
                 }
             }
 
-        val thumbnail = thumbnailCandidates.maxByOrNull { it.width ?: -1 }
+        thumbnailCandidates.maxByOrNull { it.width ?: -1 }
+    }
+
+    val bodyThumbnail: ThumbnailImage? by lazy {
+        // Now we are resolving against original, not the feed
+        val baseUrl: String = linkToHtml(feedBaseUrl, link) ?: feedBaseUrl.toString()
+        findFirstImageInHtml(this.content, baseUrl)
+    }
+
+    val thumbnail: ThumbnailImage? by lazy {
+        val thumbnail = feedThumbnail
 
         if (thumbnail is EnclosureImage && (thumbnail.length == 0L || thumbnail.length > 50_000L)) {
             // Enclosures don't have width/height, so guessing from length
@@ -131,10 +153,7 @@ class FeederGoItem(
             return@lazy thumbnail
         }
 
-        // Now we are resolving against original, not the feed
-        val baseUrl: String = linkToHtml(feedBaseUrl, link) ?: feedBaseUrl.toString()
-
-        findFirstImageInHtml(this.content, baseUrl) ?: thumbnail
+        bodyThumbnail ?: thumbnail
     }
 }
 
